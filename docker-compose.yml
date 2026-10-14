@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: candy-store-postgres
+    environment:
+      POSTGRES_USER: candy
+      POSTGRES_PASSWORD: candy
+      POSTGRES_DB: candy_store
+    ports:
+      - "5433:5432"
+    volumes:
+      - candy-store-pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U candy -d candy_store"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  candy-store-pgdata:

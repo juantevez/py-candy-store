@@ -42,7 +42,7 @@ select = ["E", "F", "W", "I", "N", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "DTZ"
 
 [tool.mypy]
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "tools"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -80,6 +80,7 @@ ignore_imports = [
     "candy_store.sales.infrastructure.inventory.** -> candy_store.inventory.public",
     "candy_store.sales.infrastructure.catalog.** -> candy_store.catalog.public",
     "candy_store.inventory.infrastructure.catalog.** -> candy_store.catalog.public",
+    "candy_store.purchasing.infrastructure.catalog.** -> candy_store.catalog.public",
 ]
 
 [[tool.importlinter.contracts]]

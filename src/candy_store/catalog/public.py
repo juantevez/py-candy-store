@@ -16,6 +16,7 @@ class ProductInfo:
     name: str
     price: Money
     active: bool
+    is_kit: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +33,9 @@ class CatalogFacade:
         """Datos vigentes de los productos pedidos. Los inexistentes no aparecen."""
         views = await GetProductsUseCase(self._uow_factory()).execute(product_ids)
         return {
-            pid: ProductInfo(product_id=pid, name=v.name, price=v.price, active=v.active)
+            pid: ProductInfo(
+                product_id=pid, name=v.name, price=v.price, active=v.active, is_kit=v.is_kit
+            )
             for pid, v in views.items()
         }
 

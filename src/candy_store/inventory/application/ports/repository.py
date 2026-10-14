@@ -35,6 +35,7 @@ class InventoryOperation(StrEnum):
     RESERVATION_CONFIRMATION = "reservation_confirmation"
     RESERVATION_RELEASE = "reservation_release"
     KIT_ASSEMBLY = "kit_assembly"
+    SUPPLIER_DELIVERY = "supplier_delivery"
 
 
 class OperationLog(ABC):

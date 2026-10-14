@@ -9,6 +9,7 @@ from datetime import timedelta
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.datastructures import State
 
@@ -21,11 +22,19 @@ from candy_store.inventory.application.use_cases.release_reservations import (
     ReleaseExpiredReservationsUseCase,
 )
 from candy_store.inventory.infrastructure.catalog.kit_recipes import InProcessKitRecipes
+from candy_store.inventory.infrastructure.internal.purchasing_events import (
+    REMITTANCE_RECEIVED,
+    remittance_received_handler,
+)
 from candy_store.inventory.infrastructure.persistence.unit_of_work import (
     SqlAlchemyInventoryUnitOfWork,
 )
 from candy_store.inventory.infrastructure.web import router as inventory_web
 from candy_store.inventory.public import InventoryFacade
+from candy_store.purchasing.infrastructure.catalog.product_catalog import (
+    InProcessPurchasingCatalog,
+)
+from candy_store.purchasing.infrastructure.web import router as purchasing_web
 from candy_store.sales.application.ports.payment_gateway import PaymentGateway
 from candy_store.sales.infrastructure.catalog.product_catalog import InProcessProductCatalog
 from candy_store.sales.infrastructure.external.mercadopago import (
@@ -78,12 +87,19 @@ def configure_services(
     state.product_catalog = InProcessProductCatalog(catalog_facade)
     # Inventory lee las recetas de kits del catálogo para armarlos.
     state.kit_recipes = InProcessKitRecipes(catalog_facade)
+    state.purchasing_catalog = InProcessPurchasingCatalog(catalog_facade)
     state.payment_gateway = payment_gateway
 
-    # Integración asincrónica: cuando vence una reserva, sales cancela la orden.
+    # Integración asincrónica (eventos del outbox):
+    # - cuando vence una reserva, sales cancela la orden;
+    # - cuando compras acepta un remito, inventory ingresa los lotes.
     event_bus.subscribe(
         STOCK_RESERVATION_RELEASED,
         stock_hold_expired_handler(lambda: SqlAlchemySalesUnitOfWork(session_factory), clock),
+    )
+    event_bus.subscribe(
+        REMITTANCE_RECEIVED,
+        remittance_received_handler(lambda: SqlAlchemyInventoryUnitOfWork(session_factory)),
     )
 
 
@@ -150,12 +166,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="Candy Store", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["*"],
+    )
     install_error_handlers(
         app,
-        {**catalog_web.ERROR_STATUS, **inventory_web.ERROR_STATUS, **sales_web.ERROR_STATUS},
+        {
+            **catalog_web.ERROR_STATUS,
+            **inventory_web.ERROR_STATUS,
+            **purchasing_web.ERROR_STATUS,
+            **sales_web.ERROR_STATUS,
+        },
     )
     app.include_router(health.router)
     app.include_router(catalog_web.router)
     app.include_router(inventory_web.router)
+    app.include_router(purchasing_web.router)
     app.include_router(sales_web.router)
     return app

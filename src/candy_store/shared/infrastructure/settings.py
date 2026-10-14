@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8000"
     # URL del frontend de la tienda (a dónde vuelve el comprador después de pagar).
     storefront_url: str = "http://localhost:3000"
+    # Orígenes del navegador habilitados para llamar a la API (CORS). En variables de
+    # entorno va como JSON: CANDY_CORS_ORIGINS='["https://tienda.com.ar"]'.
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     mercadopago_api_url: str = "https://api.mercadopago.com"
     mercadopago_access_token: str = ""
     # Clave secreta del webhook (panel de MercadoPago > Webhooks). Sin ella se

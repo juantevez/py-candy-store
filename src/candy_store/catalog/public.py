@@ -7,7 +7,7 @@ from candy_store.catalog.application.ports.repository import CatalogUnitOfWork
 from candy_store.catalog.application.use_cases.get_products import GetProductsUseCase
 from candy_store.shared.domain.value_objects import Money, ProductId
 
-__all__ = ["CatalogFacade", "ProductInfo"]
+__all__ = ["CatalogFacade", "KitComponentInfo", "ProductInfo"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +16,12 @@ class ProductInfo:
     name: str
     price: Money
     active: bool
+
+
+@dataclass(frozen=True, slots=True)
+class KitComponentInfo:
+    product_id: ProductId
+    quantity: int
 
 
 class CatalogFacade:
@@ -29,3 +35,11 @@ class CatalogFacade:
             pid: ProductInfo(product_id=pid, name=v.name, price=v.price, active=v.active)
             for pid, v in views.items()
         }
+
+    async def get_kit_recipe(self, product_id: ProductId) -> tuple[KitComponentInfo, ...] | None:
+        """Receta vigente del kit, o None si el producto no existe o no es un kit."""
+        views = await GetProductsUseCase(self._uow_factory()).execute([product_id])
+        view = views.get(product_id)
+        if view is None or not view.is_kit:
+            return None
+        return tuple(KitComponentInfo(c.product_id, c.quantity) for c in view.components)

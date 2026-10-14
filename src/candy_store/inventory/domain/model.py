@@ -12,12 +12,15 @@ from candy_store.inventory.domain.errors import (
     DuplicateReservationError,
     ExpiredBatchReceivedError,
     InsufficientStockError,
+    InvalidKitAssemblyError,
     InvalidQuantityError,
     ReservationNotFoundError,
 )
 from candy_store.inventory.domain.events import (
+    KitsAssembled,
     StockAdjusted,
     StockBatchReceived,
+    StockConsumedForKits,
     StockDeducted,
     StockReservationReleased,
     StockReserved,
@@ -27,6 +30,7 @@ from candy_store.inventory.domain.value_objects import (
     AdjustmentReason,
     BatchAllocation,
     BatchId,
+    ComponentUsage,
     ExpirationDate,
     LotNumber,
     StockLocation,
@@ -170,20 +174,7 @@ class InventoryItem(AggregateRoot):
         received_at: datetime,
         today: date,
     ) -> None:
-        _require_positive(quantity)
-        if batch_id in self._batches:
-            raise DuplicateBatchError(f"El lote {batch_id} ya fue ingresado")
-        if expiration.is_expired(today):
-            raise ExpiredBatchReceivedError(
-                f"No se puede ingresar el lote {lot_number}: venció el {expiration.value}"
-            )
-        self._batches[batch_id] = StockBatch(
-            batch_id=batch_id,
-            lot_number=lot_number,
-            expiration=expiration,
-            quantity_on_hand=quantity,
-            received_at=received_at,
-        )
+        self._add_batch(batch_id, lot_number, expiration, quantity, received_at, today)
         self._record(
             StockBatchReceived(
                 product_id=self.product_id,
@@ -205,7 +196,9 @@ class InventoryItem(AggregateRoot):
         available = self.available_quantity(today)
         if quantity > available:
             raise InsufficientStockError(requested=quantity, available=available)
-        return self._consume(quantity, today, reference=reference, from_reservation=False)
+        allocations = self._take(quantity, today)
+        self._record_deduction(reference, allocations, from_reservation=False)
+        return allocations
 
     def reserve(
         self,
@@ -245,9 +238,8 @@ class InventoryItem(AggregateRoot):
         el llamador decide (ej. devolver el pago).
         """
         reservation = self._get_reservation(reference)
-        allocations = self._consume(
-            reservation.quantity, today, reference=reference, from_reservation=True
-        )
+        allocations = self._take(reservation.quantity, today)
+        self._record_deduction(reference, allocations, from_reservation=True)
         del self._reservations[reference]
         return allocations
 
@@ -260,6 +252,65 @@ class InventoryItem(AggregateRoot):
         for reservation in expired:
             self._release(reservation, expired=True)
         return tuple(r.reference for r in expired)
+
+    # --- Kits pre-armados ------------------------------------------------
+
+    def consume_for_kits(
+        self, quantity: int, today: date, *, reference: StockReference
+    ) -> tuple[BatchAllocation, ...]:
+        """Componente que sale del stock para armar kits. Respeta las reservas igual
+        que una venta: no se arman kits con stock apartado para órdenes online."""
+        _require_positive(quantity)
+        available = self.available_quantity(today)
+        if quantity > available:
+            raise InsufficientStockError(requested=quantity, available=available)
+        allocations = self._take(quantity, today)
+        self._record(
+            StockConsumedForKits(
+                product_id=self.product_id,
+                location=self.location,
+                reference=reference,
+                allocations=allocations,
+            )
+        )
+        return allocations
+
+    def add_assembled_kits(
+        self,
+        *,
+        batch_id: BatchId,
+        lot_number: LotNumber,
+        quantity: int,
+        components: tuple[ComponentUsage, ...],
+        assembled_at: datetime,
+        today: date,
+        reference: StockReference,
+    ) -> ExpirationDate:
+        """Ingresa un lote de kits recién armados.
+
+        El kit vence cuando vence el primero de sus componentes: es la fecha que
+        corresponde imprimir en la caja.
+        """
+        expirations = [a.expiration for c in components for a in c.allocations]
+        if not expirations:
+            raise InvalidKitAssemblyError("Un lote de kits necesita componentes")
+        if any(c.product_id == self.product_id for c in components):
+            raise InvalidKitAssemblyError("Un kit no puede ser componente de sí mismo")
+        expiration = min(expirations)
+        self._add_batch(batch_id, lot_number, expiration, quantity, assembled_at, today)
+        self._record(
+            KitsAssembled(
+                product_id=self.product_id,
+                location=self.location,
+                reference=reference,
+                batch_id=batch_id,
+                lot_number=lot_number,
+                expiration=expiration,
+                quantity=quantity,
+                components=components,
+            )
+        )
+        return expiration
 
     # --- Ajustes ---------------------------------------------------------
 
@@ -293,12 +344,43 @@ class InventoryItem(AggregateRoot):
 
     # --- Internos --------------------------------------------------------
 
-    def _consume(
-        self, quantity: int, today: date, *, reference: StockReference, from_reservation: bool
-    ) -> tuple[BatchAllocation, ...]:
+    def _add_batch(
+        self,
+        batch_id: BatchId,
+        lot_number: LotNumber,
+        expiration: ExpirationDate,
+        quantity: int,
+        received_at: datetime,
+        today: date,
+    ) -> None:
+        _require_positive(quantity)
+        if batch_id in self._batches:
+            raise DuplicateBatchError(f"El lote {batch_id} ya fue ingresado")
+        if expiration.is_expired(today):
+            raise ExpiredBatchReceivedError(
+                f"No se puede ingresar el lote {lot_number}: venció el {expiration.value}"
+            )
+        self._batches[batch_id] = StockBatch(
+            batch_id=batch_id,
+            lot_number=lot_number,
+            expiration=expiration,
+            quantity_on_hand=quantity,
+            received_at=received_at,
+        )
+
+    def _take(self, quantity: int, today: date) -> tuple[BatchAllocation, ...]:
         allocations = allocate_fefo(self._batches.values(), quantity, today)
         for allocation in allocations:
             self._batches[allocation.batch_id].remove(allocation.quantity)
+        return allocations
+
+    def _record_deduction(
+        self,
+        reference: StockReference,
+        allocations: tuple[BatchAllocation, ...],
+        *,
+        from_reservation: bool,
+    ) -> None:
         self._record(
             StockDeducted(
                 product_id=self.product_id,
@@ -308,7 +390,6 @@ class InventoryItem(AggregateRoot):
                 from_reservation=from_reservation,
             )
         )
-        return allocations
 
     def _release(self, reservation: StockReservation, *, expired: bool) -> None:
         del self._reservations[reservation.reference]

@@ -1,119 +1,19 @@
 """Flujos de venta de punta a punta por HTTP: catálogo + inventario + ventas con la
 base real y el cableado real de main.py. Solo MercadoPago es un doble."""
 
-import hashlib
-import hmac
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from candy_store.inventory.application.use_cases.release_reservations import (
-    ReleaseExpiredReservationsUseCase,
-)
-from candy_store.inventory.infrastructure.persistence.unit_of_work import (
-    SqlAlchemyInventoryUnitOfWork,
-)
-from candy_store.main import configure_services, create_app
 from candy_store.sales.domain.value_objects import OrderId
 from candy_store.shared.domain.value_objects import Money
-from candy_store.shared.infrastructure.event_bus import EventBus
-from candy_store.shared.infrastructure.outbox import OutboxRelay
-from candy_store.shared.infrastructure.settings import Settings
-from tests.fakes import FakePaymentGateway, FixedClock
-from tests.unit.inventory.conftest import NOW, TODAY
+from tests.integration.conftest import Shop
+from tests.unit.inventory.conftest import NOW
 
 pytestmark = pytest.mark.integration
-
-WEBHOOK_SECRET = "secreto-de-prueba"
-
-
-@dataclass
-class Shop:
-    client: AsyncClient
-    app: FastAPI
-    payments: FakePaymentGateway
-    clock: FixedClock
-    session_factory: async_sessionmaker[AsyncSession]
-
-    async def product(self, sku: str, price: str, *, store: int = 0, warehouse: int = 0) -> str:
-        response = await self.client.post(
-            "/catalog/products", json={"sku": sku, "name": f"Producto {sku}", "price": price}
-        )
-        assert response.status_code == 201, response.text
-        product_id: str = response.json()["product_id"]
-        for location, quantity in (("store_front", store), ("warehouse", warehouse)):
-            if quantity:
-                received = await self.client.post(
-                    "/inventory/batches",
-                    json={
-                        "product_id": product_id,
-                        "location": location,
-                        "lot_number": "L1",
-                        "expiration": (TODAY + timedelta(days=60)).isoformat(),
-                        "quantity": quantity,
-                    },
-                )
-                assert received.status_code == 201, received.text
-        return product_id
-
-    async def stock(self, product_id: str) -> dict[str, dict[str, int]]:
-        body = (await self.client.get(f"/inventory/products/{product_id}/stock")).json()
-        return {loc["location"]: loc for loc in body["locations"]}
-
-    async def order(self, order_id: str) -> dict[str, Any]:
-        response = await self.client.get(f"/sales/orders/{order_id}")
-        assert response.status_code == 200
-        body: dict[str, Any] = response.json()
-        return body
-
-    async def notify_payment(
-        self, payment_id: str, *, secret: str = WEBHOOK_SECRET
-    ) -> tuple[int, dict[str, Any]]:
-        request_id, ts = str(uuid4()), "1728918000000"
-        manifest = f"id:{payment_id};request-id:{request_id};ts:{ts};"
-        digest = hmac.new(secret.encode(), manifest.encode(), hashlib.sha256).hexdigest()
-        response = await self.client.post(
-            "/sales/webhooks/mercadopago",
-            params={"data.id": payment_id, "type": "payment"},
-            headers={"x-signature": f"ts={ts},v1={digest}", "x-request-id": request_id},
-            json={"action": "payment.updated", "type": "payment", "data": {"id": payment_id}},
-        )
-        return response.status_code, response.json()
-
-    async def run_background_jobs(self) -> None:
-        """Lo que en producción hacen las tareas periódicas."""
-        await ReleaseExpiredReservationsUseCase(
-            SqlAlchemyInventoryUnitOfWork(self.session_factory), self.clock
-        ).execute()
-        await OutboxRelay(self.session_factory, self.app.state.event_bus).publish_pending()
-
-
-@pytest.fixture
-async def shop(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[Shop]:
-    settings = Settings(mercadopago_webhook_secret=WEBHOOK_SECRET)
-    app = create_app(settings)
-    payments = FakePaymentGateway()
-    clock = FixedClock(NOW)
-    # Mismo cableado que en producción, sin lifespan (sin tareas de fondo ni HTTP real).
-    configure_services(
-        app.state,
-        settings=settings,
-        session_factory=session_factory,
-        clock=clock,
-        event_bus=EventBus(),
-        payment_gateway=payments,
-    )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        yield Shop(client, app, payments, clock, session_factory)
-
 
 # --- Mostrador -------------------------------------------------------------------
 

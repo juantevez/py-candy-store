@@ -5,6 +5,7 @@ from candy_store.inventory.domain.value_objects import (
     AdjustmentReason,
     BatchAllocation,
     BatchId,
+    ComponentUsage,
     ExpirationDate,
     LotNumber,
     StockLocation,
@@ -58,3 +59,27 @@ class StockAdjusted(DomainEvent):
     batch_id: BatchId
     delta: int
     reason: AdjustmentReason
+
+
+@dataclass(frozen=True, kw_only=True)
+class StockConsumedForKits(DomainEvent):
+    """Salida de un componente para armar kits (no es una venta)."""
+
+    product_id: ProductId
+    location: StockLocation
+    reference: StockReference
+    allocations: tuple[BatchAllocation, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class KitsAssembled(DomainEvent):
+    """Ingreso de un lote de kits armados, con la trazabilidad de sus componentes."""
+
+    product_id: ProductId
+    location: StockLocation
+    reference: StockReference
+    batch_id: BatchId
+    lot_number: LotNumber
+    expiration: ExpirationDate
+    quantity: int
+    components: tuple[ComponentUsage, ...]

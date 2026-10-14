@@ -52,3 +52,11 @@ class StockShortageError(DomainError):
         )
         super().__init__(f"Stock insuficiente ({detail})")
         self.shortages = shortages
+
+
+class KitRecipeNotFoundError(DomainError):
+    """El producto no existe o no es un kit con receta."""
+
+
+class InvalidKitAssemblyError(DomainError):
+    pass

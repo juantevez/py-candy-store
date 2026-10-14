@@ -1,13 +1,14 @@
 import pytest
 
-from candy_store.catalog.domain.errors import InvalidProductError
+from candy_store.catalog.domain.errors import InvalidKitError, InvalidProductError
 from candy_store.catalog.domain.events import (
+    KitCompositionChanged,
     ProductAvailabilityChanged,
     ProductCreated,
     ProductPriceChanged,
 )
 from candy_store.catalog.domain.model import Product
-from candy_store.catalog.domain.value_objects import Sku
+from candy_store.catalog.domain.value_objects import KitComponent, Sku
 from candy_store.shared.domain.value_objects import Money, ProductId
 
 
@@ -69,3 +70,73 @@ def test_deactivate() -> None:
     assert not product.active
     [event] = product.pull_events()
     assert isinstance(event, ProductAvailabilityChanged)
+
+
+# --- Kits ----------------------------------------------------------------------
+
+
+def make_kit(*components: KitComponent) -> Product:
+    return Product.create_kit(
+        product_id=ProductId.new(),
+        sku=Sku("KIT-NAVIDAD"),
+        name="Caja Navidad",
+        price=Money.of("9900"),
+        components=components,
+    )
+
+
+def test_kit_records_its_recipe() -> None:
+    alfajor, turron = ProductId.new(), ProductId.new()
+
+    kit = make_kit(KitComponent(alfajor, 2), KitComponent(turron, 1))
+
+    assert kit.is_kit
+    [event] = kit.pull_events()
+    assert isinstance(event, ProductCreated)
+    assert {(c.product_id, c.quantity) for c in event.components} == {(alfajor, 2), (turron, 1)}
+
+
+@pytest.mark.parametrize(
+    "components",
+    [
+        (),  # sin componentes
+        (KitComponent(ProductId.new(), 1),),  # una sola unidad no es un kit
+    ],
+)
+def test_invalid_recipes(components: tuple[KitComponent, ...]) -> None:
+    with pytest.raises(InvalidKitError):
+        make_kit(*components)
+
+
+def test_component_cannot_repeat() -> None:
+    alfajor = ProductId.new()
+    with pytest.raises(InvalidKitError):
+        make_kit(KitComponent(alfajor, 1), KitComponent(alfajor, 1))
+
+
+def test_component_quantity_must_be_positive() -> None:
+    with pytest.raises(InvalidKitError):
+        KitComponent(ProductId.new(), 0)
+
+
+def test_kit_cannot_contain_itself() -> None:
+    kit = make_kit(KitComponent(ProductId.new(), 2))
+    with pytest.raises(InvalidKitError):
+        kit.change_composition([KitComponent(kit.product_id, 2)])
+
+
+def test_change_composition() -> None:
+    kit = make_kit(KitComponent(ProductId.new(), 2))
+    kit.pull_events()
+    new_recipe = [KitComponent(ProductId.new(), 3), KitComponent(ProductId.new(), 1)]
+
+    kit.change_composition(new_recipe)
+    kit.change_composition(list(reversed(new_recipe)))  # mismo contenido: sin evento
+
+    [event] = kit.pull_events()
+    assert isinstance(event, KitCompositionChanged)
+
+
+def test_simple_product_cannot_get_a_recipe() -> None:
+    with pytest.raises(InvalidKitError):
+        make_product().change_composition([KitComponent(ProductId.new(), 2)])

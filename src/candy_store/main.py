@@ -20,6 +20,7 @@ from candy_store.catalog.public import CatalogFacade
 from candy_store.inventory.application.use_cases.release_reservations import (
     ReleaseExpiredReservationsUseCase,
 )
+from candy_store.inventory.infrastructure.catalog.kit_recipes import InProcessKitRecipes
 from candy_store.inventory.infrastructure.persistence.unit_of_work import (
     SqlAlchemyInventoryUnitOfWork,
 )
@@ -65,17 +66,18 @@ def configure_services(
     state.clock = clock
     state.event_bus = event_bus
 
-    # Sales usa inventory y catalog en proceso, a través de sus APIs públicas
-    # envueltas en los puertos propios de sales.
+    # Los contextos se usan en proceso a través de sus APIs públicas, envueltas
+    # en los puertos propios de quien las consume.
     inventory_facade = InventoryFacade(
         uow_factory=lambda: SqlAlchemyInventoryUnitOfWork(session_factory),
         clock=clock,
         reservation_ttl=timedelta(minutes=settings.reservation_ttl_minutes),
     )
+    catalog_facade = CatalogFacade(lambda: SqlAlchemyCatalogUnitOfWork(session_factory))
     state.stock_gateway = InProcessStockGateway(inventory_facade)
-    state.product_catalog = InProcessProductCatalog(
-        CatalogFacade(lambda: SqlAlchemyCatalogUnitOfWork(session_factory))
-    )
+    state.product_catalog = InProcessProductCatalog(catalog_facade)
+    # Inventory lee las recetas de kits del catálogo para armarlos.
+    state.kit_recipes = InProcessKitRecipes(catalog_facade)
     state.payment_gateway = payment_gateway
 
     # Integración asincrónica: cuando vence una reserva, sales cancela la orden.

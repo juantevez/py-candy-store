@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Self
 
+from candy_store.inventory.application.dto import StockLine
+from candy_store.inventory.application.ports.kit_recipes import KitRecipe, KitRecipeProvider
 from candy_store.inventory.application.ports.repository import (
     InventoryOperation,
     InventoryRepository,
@@ -253,3 +255,17 @@ class FakeProductCatalog(ProductCatalog):
 
     async def find(self, product_ids: Iterable[ProductId]) -> dict[ProductId, CatalogItem]:
         return {pid: self.items[pid] for pid in product_ids if pid in self.items}
+
+
+class FakeKitRecipes(KitRecipeProvider):
+    def __init__(self) -> None:
+        self.recipes: dict[ProductId, KitRecipe] = {}
+
+    def define(self, kit_id: ProductId, *components: tuple[ProductId, int]) -> None:
+        self.recipes[kit_id] = KitRecipe(
+            kit_product_id=kit_id,
+            components=tuple(StockLine(pid, qty) for pid, qty in components),
+        )
+
+    async def get(self, kit_product_id: ProductId) -> KitRecipe | None:
+        return self.recipes.get(kit_product_id)

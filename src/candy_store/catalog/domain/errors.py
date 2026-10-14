@@ -11,3 +11,7 @@ class ProductNotFoundError(DomainError):
 
 class DuplicateSkuError(DomainError):
     pass
+
+
+class InvalidKitError(InvalidProductError):
+    """Receta de kit inválida (sin componentes, componentes inexistentes, kits anidados...)."""

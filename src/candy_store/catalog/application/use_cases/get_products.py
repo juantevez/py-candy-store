@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from candy_store.catalog.application.ports.repository import CatalogUnitOfWork
 from candy_store.catalog.domain.errors import ProductNotFoundError
 from candy_store.catalog.domain.model import Product
+from candy_store.catalog.domain.value_objects import KitComponent
 from candy_store.shared.domain.value_objects import Money, ProductId
 
 
@@ -18,6 +19,11 @@ class ProductView:
     name: str
     price: Money
     active: bool
+    components: tuple[KitComponent, ...]
+
+    @property
+    def is_kit(self) -> bool:
+        return bool(self.components)
 
     @classmethod
     def of(cls, product: Product) -> ProductView:
@@ -27,6 +33,7 @@ class ProductView:
             name=product.name,
             price=product.price,
             active=product.active,
+            components=product.components,
         )
 
 

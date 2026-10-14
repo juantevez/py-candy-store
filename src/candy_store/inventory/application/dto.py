@@ -12,6 +12,7 @@ from candy_store.inventory.domain.errors import InvalidQuantityError
 from candy_store.inventory.domain.value_objects import (
     BatchAllocation,
     BatchId,
+    ComponentUsage,
     ExpirationDate,
     LotNumber,
 )
@@ -53,6 +54,30 @@ class LineAllocations:
         return sum(a.quantity for a in self.allocations)
 
 
+def _allocations_to_json(allocations: tuple[BatchAllocation, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "batch_id": str(a.batch_id),
+            "lot_number": a.lot_number.value,
+            "expiration": a.expiration.value.isoformat(),
+            "quantity": a.quantity,
+        }
+        for a in allocations
+    ]
+
+
+def _allocations_from_json(data: list[dict[str, Any]]) -> tuple[BatchAllocation, ...]:
+    return tuple(
+        BatchAllocation(
+            batch_id=BatchId(UUID(a["batch_id"])),
+            lot_number=LotNumber(a["lot_number"]),
+            expiration=ExpirationDate(date.fromisoformat(a["expiration"])),
+            quantity=a["quantity"],
+        )
+        for a in data
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DeductionResult:
     """Qué lotes salieron por cada producto (trazabilidad de la venta)."""
@@ -64,15 +89,7 @@ class DeductionResult:
             "lines": [
                 {
                     "product_id": str(line.product_id),
-                    "allocations": [
-                        {
-                            "batch_id": str(a.batch_id),
-                            "lot_number": a.lot_number.value,
-                            "expiration": a.expiration.value.isoformat(),
-                            "quantity": a.quantity,
-                        }
-                        for a in line.allocations
-                    ],
+                    "allocations": _allocations_to_json(line.allocations),
                 }
                 for line in self.lines
             ]
@@ -84,18 +101,55 @@ class DeductionResult:
             lines=tuple(
                 LineAllocations(
                     product_id=ProductId(UUID(line["product_id"])),
-                    allocations=tuple(
-                        BatchAllocation(
-                            batch_id=BatchId(UUID(a["batch_id"])),
-                            lot_number=LotNumber(a["lot_number"]),
-                            expiration=ExpirationDate(date.fromisoformat(a["expiration"])),
-                            quantity=a["quantity"],
-                        )
-                        for a in line["allocations"]
-                    ),
+                    allocations=_allocations_from_json(line["allocations"]),
                 )
                 for line in data["lines"]
             )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AssemblyResult:
+    """Lote de kits armado y de qué lotes de componentes salió (para retiros de mercadería)."""
+
+    kit_product_id: ProductId
+    batch_id: BatchId
+    lot_number: LotNumber
+    expiration: ExpirationDate
+    quantity: int
+    components: tuple[ComponentUsage, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "kit_product_id": str(self.kit_product_id),
+            "batch_id": str(self.batch_id),
+            "lot_number": self.lot_number.value,
+            "expiration": self.expiration.value.isoformat(),
+            "quantity": self.quantity,
+            "components": [
+                {
+                    "product_id": str(c.product_id),
+                    "allocations": _allocations_to_json(c.allocations),
+                }
+                for c in self.components
+            ],
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> AssemblyResult:
+        return cls(
+            kit_product_id=ProductId(UUID(data["kit_product_id"])),
+            batch_id=BatchId(UUID(data["batch_id"])),
+            lot_number=LotNumber(data["lot_number"]),
+            expiration=ExpirationDate(date.fromisoformat(data["expiration"])),
+            quantity=data["quantity"],
+            components=tuple(
+                ComponentUsage(
+                    product_id=ProductId(UUID(c["product_id"])),
+                    allocations=_allocations_from_json(c["allocations"]),
+                )
+                for c in data["components"]
+            ),
         )
 
 

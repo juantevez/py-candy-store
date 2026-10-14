@@ -7,9 +7,14 @@ Las salidas de stock por ventas no se exponen acá: sales las hace a través de
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 
+from candy_store.inventory.application.ports.kit_recipes import KitRecipeProvider
 from candy_store.inventory.application.ports.repository import InventoryUnitOfWork
+from candy_store.inventory.application.use_cases.assemble_kits import (
+    AssembleKitsCommand,
+    AssembleKitsUseCase,
+)
 from candy_store.inventory.application.use_cases.get_stock_summary import (
     GetStockSummaryUseCase,
 )
@@ -27,13 +32,20 @@ from candy_store.inventory.domain.errors import (
     BatchNotFoundError,
     DuplicateBatchError,
     InsufficientStockError,
+    KitRecipeNotFoundError,
     StockShortageError,
 )
-from candy_store.inventory.domain.value_objects import AdjustmentReason, BatchId
+from candy_store.inventory.domain.value_objects import (
+    AdjustmentReason,
+    BatchId,
+    StockReference,
+)
 from candy_store.inventory.infrastructure.persistence.unit_of_work import (
     SqlAlchemyInventoryUnitOfWork,
 )
 from candy_store.inventory.infrastructure.web.schemas import (
+    AssembleKitsRequest,
+    AssemblyResponse,
     AuditCountRequest,
     AuditCountResponse,
     ReceiveBatchRequest,
@@ -50,6 +62,7 @@ ERROR_STATUS: ErrorStatusMap = {
     DuplicateBatchError: status.HTTP_409_CONFLICT,
     StockShortageError: status.HTTP_409_CONFLICT,
     BatchNotFoundError: status.HTTP_404_NOT_FOUND,
+    KitRecipeNotFoundError: status.HTTP_422_UNPROCESSABLE_CONTENT,
 }
 
 
@@ -57,7 +70,13 @@ def _inventory_uow(session_factory: SessionFactoryDep) -> InventoryUnitOfWork:
     return SqlAlchemyInventoryUnitOfWork(session_factory)
 
 
+def _kit_recipes(request: Request) -> KitRecipeProvider:
+    recipes: KitRecipeProvider = request.app.state.kit_recipes
+    return recipes
+
+
 UowDep = Annotated[InventoryUnitOfWork, Depends(_inventory_uow)]
+KitRecipesDep = Annotated[KitRecipeProvider, Depends(_kit_recipes)]
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
@@ -108,3 +127,20 @@ async def register_audit_count(body: AuditCountRequest, uow: UowDep) -> AuditCou
 async def get_stock(product_id: UUID, uow: UowDep, clock: ClockDep) -> StockSummaryResponse:
     summary = await GetStockSummaryUseCase(uow, clock).execute(ProductId(product_id))
     return StockSummaryResponse.from_view(summary)
+
+
+@router.post("/kit-assemblies", status_code=status.HTTP_201_CREATED)
+async def assemble_kits(
+    body: AssembleKitsRequest, uow: UowDep, recipes: KitRecipesDep, clock: ClockDep
+) -> AssemblyResponse:
+    """Arma kits pre-armados: consume componentes por FEFO y crea un lote del kit."""
+    result = await AssembleKitsUseCase(uow, recipes, clock).execute(
+        AssembleKitsCommand(
+            assembly_id=StockReference(str(body.assembly_id)),
+            kit_product_id=ProductId(body.kit_product_id),
+            location=body.location,
+            quantity=body.quantity,
+            lot_number=body.lot_number,
+        )
+    )
+    return AssemblyResponse.from_result(result)

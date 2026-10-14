@@ -7,8 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from candy_store.catalog.application.ports.repository import CatalogRepository
 from candy_store.catalog.domain.model import Product
-from candy_store.catalog.domain.value_objects import Sku
-from candy_store.catalog.infrastructure.persistence.models import CatalogProductRow
+from candy_store.catalog.domain.value_objects import KitComponent, Sku
+from candy_store.catalog.infrastructure.persistence.models import (
+    CatalogKitComponentRow,
+    CatalogProductRow,
+)
 from candy_store.shared.domain.value_objects import Money, ProductId
 
 
@@ -60,6 +63,7 @@ class SqlAlchemyCatalogRepository(CatalogRepository):
             row.price_amount = product.price.amount
             row.price_currency = product.price.currency
             row.active = product.active
+            _sync_components(product, row)
             row.version = product.version + 1
             product.version = row.version
 
@@ -72,7 +76,25 @@ class SqlAlchemyCatalogRepository(CatalogRepository):
                 name=row.name,
                 price=Money(row.price_amount, row.price_currency),
                 active=row.active,
+                components=[
+                    KitComponent(product_id=ProductId(c.component_id), quantity=c.quantity)
+                    for c in row.components
+                ],
                 version=row.version,
             )
             self._seen[product_id] = (product, row)
         return self._seen[product_id][0]
+
+
+def _sync_components(product: Product, row: CatalogProductRow) -> None:
+    # Se modifica en el lugar: reemplazar la lista entera haría que SQLAlchemy
+    # inserte filas nuevas antes de borrar las viejas con la misma clave primaria.
+    wanted = {c.product_id.value: c.quantity for c in product.components}
+    for component in list(row.components):
+        if component.component_id not in wanted:
+            row.components.remove(component)
+        else:
+            component.quantity = wanted.pop(component.component_id)
+    row.components.extend(
+        CatalogKitComponentRow(component_id=cid, quantity=qty) for cid, qty in wanted.items()
+    )

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 
-from candy_store.shared.domain.value_objects import EntityId
+from candy_store.shared.domain.value_objects import EntityId, ProductId
 
 
 class BatchId(EntityId):
@@ -86,3 +86,15 @@ class BatchAllocation:
     lot_number: LotNumber
     expiration: ExpirationDate
     quantity: int
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentUsage:
+    """Qué lotes de un componente se usaron para armar un lote de kits."""
+
+    product_id: ProductId
+    allocations: tuple[BatchAllocation, ...]
+
+    @property
+    def quantity(self) -> int:
+        return sum(a.quantity for a in self.allocations)

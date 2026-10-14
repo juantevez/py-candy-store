@@ -79,6 +79,7 @@ modules = [
 ignore_imports = [
     "candy_store.sales.infrastructure.inventory.** -> candy_store.inventory.public",
     "candy_store.sales.infrastructure.catalog.** -> candy_store.catalog.public",
+    "candy_store.inventory.infrastructure.catalog.** -> candy_store.catalog.public",
 ]
 
 [[tool.importlinter.contracts]]

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from candy_store.catalog.domain.value_objects import Sku
+from candy_store.catalog.domain.value_objects import KitComponent, Sku
 from candy_store.shared.domain.events import DomainEvent
 from candy_store.shared.domain.value_objects import Money, ProductId
 
@@ -11,6 +11,7 @@ class ProductCreated(DomainEvent):
     sku: Sku
     name: str
     price: Money
+    components: tuple[KitComponent, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -24,3 +25,9 @@ class ProductPriceChanged(DomainEvent):
 class ProductAvailabilityChanged(DomainEvent):
     product_id: ProductId
     active: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class KitCompositionChanged(DomainEvent):
+    product_id: ProductId
+    components: tuple[KitComponent, ...]

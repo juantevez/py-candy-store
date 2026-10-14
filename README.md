@@ -66,9 +66,11 @@ Inventory → sales es asincrónico: cuando vence una reserva, el evento
 | POST   | `/catalog/products`                               | Alta de producto (SKU, nombre, precio)   |
 | GET    | `/catalog/products`, `/catalog/products/{id}`     | Consulta del catálogo                    |
 | PATCH  | `/catalog/products/{id}`                          | Cambio de nombre, precio o activo        |
+| PUT    | `/catalog/products/{id}/components`               | Cambio de la receta de un kit            |
 | POST   | `/inventory/batches`                              | Ingreso de un lote                       |
 | POST   | `/inventory/losses`                               | Merma, rotura o baja por vencimiento     |
 | POST   | `/inventory/audit-counts`                         | Corrección por conteo físico             |
+| POST   | `/inventory/kit-assemblies`                       | Armado de kits pre-armados               |
 | GET    | `/inventory/products/{product_id}/stock`          | Stock por ubicación y lote               |
 | POST   | `/sales/counter-sales`                            | Venta de mostrador (descuenta del salón) |
 | POST   | `/sales/checkouts`                                | Checkout web: reserva + pago MercadoPago |
@@ -81,6 +83,20 @@ cliente (caja o frontend): reenviar el mismo pedido no lo duplica.
 Los errores de negocio responden `{"code", "detail", ...}`: 409 para conflictos
 (stock, estado de la orden, concurrencia), 404 para recursos inexistentes, 502 si
 MercadoPago no responde, 422 para el resto.
+
+## Kits pre-armados
+
+Un kit es un producto del catálogo con receta (`components` al crearlo). No se
+anidan kits. Se arman de antemano con `POST /inventory/kit-assemblies`:
+
+- Consume los componentes por FEFO en la ubicación indicada y crea un lote del
+  kit, todo en una transacción (si falta un componente, no se mueve nada).
+- El lote del kit **vence con su primer componente**: es la fecha a imprimir en la caja.
+- No usa stock reservado para órdenes online.
+- Queda registrado qué lotes de cada componente entraron en cada lote de kits
+  (evento `KitsAssembled`), para responder ante un retiro de mercadería.
+- Una vez armado se vende como cualquier producto. Cambiar la receta solo afecta
+  a los kits que se armen después.
 
 ## Ciclo de vida de una orden
 

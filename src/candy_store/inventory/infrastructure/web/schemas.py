@@ -9,12 +9,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, StringConstraints
 
+from candy_store.inventory.application.dto import AssemblyResult
 from candy_store.inventory.application.use_cases.get_stock_summary import (
     BatchView,
     LocationStock,
     StockSummary,
 )
-from candy_store.inventory.domain.value_objects import StockLocation
+from candy_store.inventory.domain.value_objects import BatchAllocation, StockLocation
 
 LotNumberStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 
@@ -104,4 +105,61 @@ class StockSummaryResponse(BaseModel):
             product_id=summary.product_id.value,
             total_available=summary.total_available,
             locations=[LocationStockOut.from_view(loc) for loc in summary.locations],
+        )
+
+
+class AssembleKitsRequest(_Request):
+    assembly_id: UUID
+    kit_product_id: UUID
+    location: StockLocation
+    quantity: PositiveInt
+    lot_number: LotNumberStr | None = None
+
+
+class AllocationOut(BaseModel):
+    batch_id: UUID
+    lot_number: str
+    expiration: date
+    quantity: int
+
+    @classmethod
+    def of(cls, allocation: BatchAllocation) -> AllocationOut:
+        return cls(
+            batch_id=allocation.batch_id.value,
+            lot_number=allocation.lot_number.value,
+            expiration=allocation.expiration.value,
+            quantity=allocation.quantity,
+        )
+
+
+class ComponentUsageOut(BaseModel):
+    product_id: UUID
+    quantity: int
+    allocations: list[AllocationOut]
+
+
+class AssemblyResponse(BaseModel):
+    kit_product_id: UUID
+    batch_id: UUID
+    lot_number: str
+    expiration: date
+    quantity: int
+    components: list[ComponentUsageOut]
+
+    @classmethod
+    def from_result(cls, result: AssemblyResult) -> AssemblyResponse:
+        return cls(
+            kit_product_id=result.kit_product_id.value,
+            batch_id=result.batch_id.value,
+            lot_number=result.lot_number.value,
+            expiration=result.expiration.value,
+            quantity=result.quantity,
+            components=[
+                ComponentUsageOut(
+                    product_id=c.product_id.value,
+                    quantity=c.quantity,
+                    allocations=[AllocationOut.of(a) for a in c.allocations],
+                )
+                for c in result.components
+            ],
         )

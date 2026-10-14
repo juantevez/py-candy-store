@@ -34,6 +34,9 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "DTZ"]
 
+[tool.ruff.lint.per-file-ignores]
+"migrations/versions/*" = ["E501", "W291"]
+
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
@@ -42,9 +45,11 @@ files = ["src", "tests"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = ["integration: requiere PostgreSQL (docker compose up -d)"]
 
 [tool.importlinter]
 root_package = "candy_store"
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Hexagonal: infrastructure -> application -> domain"
@@ -78,3 +83,20 @@ forbidden_modules = [
     "candy_store.purchasing",
     "candy_store.sales",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Domain and application are framework-free"
+type = "forbidden"
+source_modules = [
+    "candy_store.shared.domain",
+    "candy_store.shared.application",
+    "candy_store.catalog.domain",
+    "candy_store.catalog.application",
+    "candy_store.inventory.domain",
+    "candy_store.inventory.application",
+    "candy_store.purchasing.domain",
+    "candy_store.purchasing.application",
+    "candy_store.sales.domain",
+    "candy_store.sales.application",
+]
+forbidden_modules = ["sqlalchemy", "alembic", "asyncpg", "pydantic", "pydantic_settings"]

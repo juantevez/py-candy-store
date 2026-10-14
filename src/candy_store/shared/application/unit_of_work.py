@@ -5,6 +5,10 @@ from types import TracebackType
 from typing import Self
 
 
+class ConcurrencyError(Exception):
+    """Otra transacción modificó el mismo agregado. La operación puede reintentarse."""
+
+
 class UnitOfWork(ABC):
     """Frontera transaccional de un caso de uso.
 

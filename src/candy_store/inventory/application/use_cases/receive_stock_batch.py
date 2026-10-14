@@ -10,6 +10,7 @@ from candy_store.inventory.domain.value_objects import (
     StockLocation,
 )
 from candy_store.shared.application.clock import Clock
+from candy_store.shared.application.retry import retry_on_concurrency
 from candy_store.shared.domain.value_objects import ProductId
 
 
@@ -27,6 +28,7 @@ class ReceiveStockBatchUseCase:
         self._uow = uow
         self._clock = clock
 
+    @retry_on_concurrency()
     async def execute(self, command: ReceiveStockBatchCommand) -> BatchId:
         batch_id = BatchId.new()
         async with self._uow as uow:

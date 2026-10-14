@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from candy_store.inventory.application.ports.repository import InventoryRepository
@@ -39,8 +42,31 @@ class SqlAlchemyInventoryRepository(InventoryRepository):
         self._seen[key] = (item, row)
         return item
 
+    async def get_by_reservation(self, reservation_id: ReservationId) -> InventoryItem | None:
+        row = (
+            await self._session.execute(
+                select(StockReservationRow.product_id, StockReservationRow.location).where(
+                    StockReservationRow.id == reservation_id.value
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return await self.get(ProductId(row.product_id), StockLocation(row.location))
+
     async def add(self, item: InventoryItem) -> None:
         self._seen[(item.product_id, item.location)] = (item, None)
+
+    async def keys_with_expired_reservations(
+        self, now: datetime, limit: int
+    ) -> list[tuple[ProductId, StockLocation]]:
+        rows = await self._session.execute(
+            select(StockReservationRow.product_id, StockReservationRow.location)
+            .where(StockReservationRow.expires_at <= now)
+            .distinct()
+            .limit(limit)
+        )
+        return [(ProductId(r.product_id), StockLocation(r.location)) for r in rows]
 
     @property
     def seen(self) -> list[InventoryItem]:

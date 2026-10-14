@@ -4,6 +4,7 @@ from candy_store.inventory.application.ports.repository import InventoryUnitOfWo
 from candy_store.inventory.domain.errors import BatchNotFoundError
 from candy_store.inventory.domain.model import InventoryItem
 from candy_store.inventory.domain.value_objects import AdjustmentReason, BatchId, StockLocation
+from candy_store.shared.application.retry import retry_on_concurrency
 from candy_store.shared.domain.value_objects import ProductId
 
 
@@ -31,6 +32,7 @@ class RegisterLossUseCase:
     def __init__(self, uow: InventoryUnitOfWork) -> None:
         self._uow = uow
 
+    @retry_on_concurrency()
     async def execute(self, command: RegisterLossCommand) -> None:
         async with self._uow as uow:
             item = await _get_item_or_fail(
@@ -56,6 +58,7 @@ class RegisterAuditCountUseCase:
     def __init__(self, uow: InventoryUnitOfWork) -> None:
         self._uow = uow
 
+    @retry_on_concurrency()
     async def execute(self, command: RegisterAuditCountCommand) -> int:
         async with self._uow as uow:
             item = await _get_item_or_fail(

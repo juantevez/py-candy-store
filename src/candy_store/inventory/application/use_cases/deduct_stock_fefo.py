@@ -4,6 +4,7 @@ from candy_store.inventory.application.ports.repository import InventoryUnitOfWo
 from candy_store.inventory.domain.errors import InsufficientStockError
 from candy_store.inventory.domain.value_objects import BatchAllocation, StockLocation
 from candy_store.shared.application.clock import Clock
+from candy_store.shared.application.retry import retry_on_concurrency
 from candy_store.shared.domain.value_objects import ProductId
 
 
@@ -19,6 +20,7 @@ class DeductStockFefoUseCase:
         self._uow = uow
         self._clock = clock
 
+    @retry_on_concurrency()
     async def execute(self, command: DeductStockFefoCommand) -> tuple[BatchAllocation, ...]:
         async with self._uow as uow:
             item = await uow.items.get(command.product_id, command.location)

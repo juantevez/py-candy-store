@@ -8,8 +8,11 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://candy:candy@localhost:5433/candy_store"
     database_echo: bool = False
+    background_tasks_enabled: bool = True
     outbox_poll_interval_seconds: float = 1.0
     outbox_batch_size: int = 100
+    reservation_ttl_minutes: int = 15
+    reservation_sweep_interval_seconds: float = 30.0
 
 
 @lru_cache

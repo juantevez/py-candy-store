@@ -54,9 +54,10 @@ async def engine(migrated_database: str) -> AsyncIterator[AsyncEngine]:
     # NullPool: pytest-asyncio usa un event loop por test y asyncpg no comparte
     # conexiones entre loops.
     engine = create_async_engine(migrated_database, poolclass=NullPool)
-    tables = ", ".join(table.name for table in metadata.sorted_tables)
+    # DELETE es mucho más rápido que TRUNCATE para tablas casi vacías.
     async with engine.begin() as conn:
-        await conn.execute(text(f"TRUNCATE {tables} CASCADE"))
+        for table in reversed(metadata.sorted_tables):
+            await conn.execute(table.delete())
     yield engine
     await engine.dispose()
 

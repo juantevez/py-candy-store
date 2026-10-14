@@ -34,21 +34,42 @@ uv run uvicorn candy_store.main:create_app --factory --reload   # API en :8000, 
 Nueva migración: `uv run alembic revision --autogenerate -m "descripcion"`.
 Configuración por variables de entorno con prefijo `CANDY_` (ver `.env.example`).
 
-## API de inventario
+## Comunicación entre contextos
 
-| Método | Ruta                                              | Uso                                   |
-|--------|---------------------------------------------------|---------------------------------------|
-| POST   | `/inventory/batches`                              | Ingreso de un lote                    |
-| POST   | `/inventory/deductions`                           | Salida inmediata FEFO (venta POS)     |
-| POST   | `/inventory/reservations`                         | Reserva temporal (checkout online)    |
-| POST   | `/inventory/reservations/{id}/confirmation`       | Pago aprobado: descuenta por FEFO     |
-| DELETE | `/inventory/reservations/{id}`                    | Libera la reserva                     |
-| POST   | `/inventory/losses`                               | Merma, rotura o baja por vencimiento  |
-| POST   | `/inventory/audit-counts`                         | Corrección por conteo físico          |
-| GET    | `/inventory/products/{product_id}/stock`          | Stock por ubicación y lote            |
+Los contextos no se importan entre sí. La única excepción explícita (verificada
+por `import-linter`) es que un adaptador puede usar la **API pública** de otro
+contexto:
+
+```
+sales.application ──► StockGateway (puerto de sales, en su lenguaje)
+                           ▲
+sales.infrastructure.inventory.InProcessStockGateway  (anti-corruption layer)
+                           │
+                           ▼
+                inventory.public.InventoryFacade  ──► casos de uso de inventory
+```
+
+- **Sincrónico** cuando sales necesita la respuesta en el acto: venta de mostrador,
+  reserva en el checkout, confirmación con el pago.
+- **Todo o nada** por venta/orden, aunque tenga varios productos.
+- **Idempotente** por id de orden: reintentos y webhooks duplicados no descuentan dos veces.
+- **Eventos (outbox)** para lo que puede ser asincrónico: avisos y trazabilidad
+  (cada `StockDeducted` lleva la referencia de la venta y los lotes que salieron).
+
+## API de inventario (back-office)
+
+| Método | Ruta                                      | Uso                                   |
+|--------|-------------------------------------------|---------------------------------------|
+| POST   | `/inventory/batches`                      | Ingreso de un lote                    |
+| POST   | `/inventory/losses`                       | Merma, rotura o baja por vencimiento  |
+| POST   | `/inventory/audit-counts`                 | Corrección por conteo físico          |
+| GET    | `/inventory/products/{product_id}/stock`  | Stock por ubicación y lote            |
+
+Las salidas de stock por ventas no se exponen por HTTP en inventory: siempre pasan
+por sales, asociadas a una venta u orden.
 
 Los errores de negocio responden `{"code", "detail", ...}`: 409 para conflictos de
-stock o concurrencia, 404 para lote o reserva inexistente, 422 para el resto.
+stock o concurrencia, 404 para recursos inexistentes, 422 para el resto.
 
 ## Decisiones de diseño
 

@@ -22,9 +22,11 @@ from candy_store.inventory.domain.value_objects import (
     BatchId,
     ExpirationDate,
     LotNumber,
-    ReservationId,
+    StockReference,
 )
 from tests.unit.inventory.conftest import NOW, TODAY, make_batch, make_item
+
+SALE = StockReference("POS-1")
 
 # --- Ingreso de lotes ---------------------------------------------------------
 
@@ -84,13 +86,14 @@ def test_deduct_consumes_earliest_expiring_batches() -> None:
     later = make_batch(quantity=10, expires_in_days=30)
     item = make_item(later, sooner)
 
-    item.deduct(7, TODAY)
+    item.deduct(7, TODAY, reference=SALE)
 
     assert sooner.quantity_on_hand == 0
     assert later.quantity_on_hand == 8
     [event] = item.pull_events()
     assert isinstance(event, StockDeducted)
-    assert event.reservation_id is None
+    assert event.reference == SALE
+    assert event.from_reservation is False
     assert [(a.batch_id, a.quantity) for a in event.allocations] == [
         (sooner.batch_id, 5),
         (later.batch_id, 2),
@@ -101,7 +104,7 @@ def test_deduct_never_sells_expired_stock() -> None:
     item = make_item(make_batch(quantity=100, expires_in_days=-1))
 
     with pytest.raises(InsufficientStockError):
-        item.deduct(1, TODAY)
+        item.deduct(1, TODAY, reference=SALE)
 
 
 def test_failed_deduct_leaves_state_untouched() -> None:
@@ -109,7 +112,7 @@ def test_failed_deduct_leaves_state_untouched() -> None:
     item = make_item(batch)
 
     with pytest.raises(InsufficientStockError):
-        item.deduct(4, TODAY)
+        item.deduct(4, TODAY, reference=SALE)
 
     assert batch.quantity_on_hand == 3
     assert item.pull_events() == []
@@ -118,14 +121,14 @@ def test_failed_deduct_leaves_state_untouched() -> None:
 def test_pos_sale_cannot_take_stock_reserved_online() -> None:
     item = make_item(make_batch(quantity=10, expires_in_days=10))
     item.reserve(
-        reservation_id=ReservationId.new(),
+        reference=StockReference("ORD-1"),
         quantity=8,
         expires_at=NOW + timedelta(minutes=15),
         today=TODAY,
     )
 
     with pytest.raises(InsufficientStockError) as exc:
-        item.deduct(3, TODAY)
+        item.deduct(3, TODAY, reference=SALE)
 
     assert exc.value.available == 2
 
@@ -137,7 +140,7 @@ def test_reserve_reduces_available_but_not_on_hand() -> None:
     item = make_item(make_batch(quantity=10, expires_in_days=10))
 
     item.reserve(
-        reservation_id=ReservationId.new(),
+        reference=StockReference("ORD-2"),
         quantity=4,
         expires_at=NOW + timedelta(minutes=15),
         today=TODAY,
@@ -151,49 +154,50 @@ def test_reserve_reduces_available_but_not_on_hand() -> None:
 def test_cannot_overbook_reservations() -> None:
     item = make_item(make_batch(quantity=5, expires_in_days=10))
     expires_at = NOW + timedelta(minutes=15)
-    item.reserve(reservation_id=ReservationId.new(), quantity=3, expires_at=expires_at, today=TODAY)
+    item.reserve(reference=StockReference("ORD-3"), quantity=3, expires_at=expires_at, today=TODAY)
 
     with pytest.raises(InsufficientStockError):
         item.reserve(
-            reservation_id=ReservationId.new(), quantity=3, expires_at=expires_at, today=TODAY
+            reference=StockReference("ORD-4"), quantity=3, expires_at=expires_at, today=TODAY
         )
 
 
-def test_duplicate_reservation_id_is_rejected() -> None:
+def test_duplicate_reservation_reference_is_rejected() -> None:
     item = make_item(make_batch(quantity=5, expires_in_days=10))
-    rid = ReservationId.new()
-    item.reserve(reservation_id=rid, quantity=1, expires_at=NOW, today=TODAY)
+    ref = StockReference("ORD-5")
+    item.reserve(reference=ref, quantity=1, expires_at=NOW, today=TODAY)
 
     with pytest.raises(DuplicateReservationError):
-        item.reserve(reservation_id=rid, quantity=1, expires_at=NOW, today=TODAY)
+        item.reserve(reference=ref, quantity=1, expires_at=NOW, today=TODAY)
 
 
 def test_confirm_reservation_deducts_by_fefo() -> None:
     sooner = make_batch(quantity=2, expires_in_days=3)
     later = make_batch(quantity=10, expires_in_days=30)
     item = make_item(later, sooner)
-    rid = ReservationId.new()
-    item.reserve(reservation_id=rid, quantity=5, expires_at=NOW, today=TODAY)
+    ref = StockReference("ORD-6")
+    item.reserve(reference=ref, quantity=5, expires_at=NOW, today=TODAY)
     item.pull_events()
 
-    item.confirm_reservation(rid, TODAY)
+    item.confirm_reservation(ref, TODAY)
 
     assert item.reserved_quantity() == 0
     assert (sooner.quantity_on_hand, later.quantity_on_hand) == (0, 7)
     [event] = item.pull_events()
     assert isinstance(event, StockDeducted)
-    assert event.reservation_id == rid
+    assert event.reference == ref
+    assert event.from_reservation is True
 
 
 def test_confirm_fails_if_stock_was_lost_meanwhile_and_keeps_reservation() -> None:
     batch = make_batch(quantity=5, expires_in_days=10)
     item = make_item(batch)
-    rid = ReservationId.new()
-    item.reserve(reservation_id=rid, quantity=5, expires_at=NOW, today=TODAY)
+    ref = StockReference("ORD-7")
+    item.reserve(reference=ref, quantity=5, expires_at=NOW, today=TODAY)
     item.register_loss(batch_id=batch.batch_id, quantity=2, reason=AdjustmentReason.BREAKAGE)
 
     with pytest.raises(InsufficientStockError):
-        item.confirm_reservation(rid, TODAY)
+        item.confirm_reservation(ref, TODAY)
 
     assert item.reserved_quantity() == 5
     assert batch.quantity_on_hand == 3
@@ -202,9 +206,9 @@ def test_confirm_fails_if_stock_was_lost_meanwhile_and_keeps_reservation() -> No
 def test_after_a_loss_first_reservation_to_confirm_wins() -> None:
     batch = make_batch(quantity=10, expires_in_days=10)
     item = make_item(batch)
-    first, second = ReservationId.new(), ReservationId.new()
-    item.reserve(reservation_id=first, quantity=6, expires_at=NOW, today=TODAY)
-    item.reserve(reservation_id=second, quantity=4, expires_at=NOW, today=TODAY)
+    first, second = StockReference("ORD-8"), StockReference("ORD-9")
+    item.reserve(reference=first, quantity=6, expires_at=NOW, today=TODAY)
+    item.reserve(reference=second, quantity=4, expires_at=NOW, today=TODAY)
     item.register_loss(batch_id=batch.batch_id, quantity=1, reason=AdjustmentReason.SHRINKAGE)
 
     item.confirm_reservation(first, TODAY)
@@ -217,11 +221,11 @@ def test_after_a_loss_first_reservation_to_confirm_wins() -> None:
 
 def test_release_reservation_frees_stock() -> None:
     item = make_item(make_batch(quantity=5, expires_in_days=10))
-    rid = ReservationId.new()
-    item.reserve(reservation_id=rid, quantity=5, expires_at=NOW, today=TODAY)
+    ref = StockReference("ORD-10")
+    item.reserve(reference=ref, quantity=5, expires_at=NOW, today=TODAY)
     item.pull_events()
 
-    item.release_reservation(rid)
+    item.release_reservation(ref)
 
     assert item.available_quantity(TODAY) == 5
     [event] = item.pull_events()
@@ -231,23 +235,19 @@ def test_release_reservation_frees_stock() -> None:
 
 def test_release_expired_reservations_only_releases_past_ttl() -> None:
     item = make_item(make_batch(quantity=10, expires_in_days=10))
-    stale, fresh = ReservationId.new(), ReservationId.new()
-    item.reserve(
-        reservation_id=stale, quantity=3, expires_at=NOW - timedelta(minutes=1), today=TODAY
-    )
-    item.reserve(
-        reservation_id=fresh, quantity=2, expires_at=NOW + timedelta(minutes=10), today=TODAY
-    )
+    stale, fresh = StockReference("ORD-11"), StockReference("ORD-12")
+    item.reserve(reference=stale, quantity=3, expires_at=NOW - timedelta(minutes=1), today=TODAY)
+    item.reserve(reference=fresh, quantity=2, expires_at=NOW + timedelta(minutes=10), today=TODAY)
 
     released = item.release_expired_reservations(NOW)
 
     assert released == (stale,)
-    assert [r.reservation_id for r in item.reservations] == [fresh]
+    assert [r.reference for r in item.reservations] == [fresh]
 
 
 def test_unknown_reservation() -> None:
     with pytest.raises(ReservationNotFoundError):
-        make_item().confirm_reservation(ReservationId.new(), TODAY)
+        make_item().confirm_reservation(StockReference("ORD-13"), TODAY)
 
 
 # --- Ajustes ------------------------------------------------------------------
@@ -321,3 +321,20 @@ def test_write_off_expired_batches() -> None:
     [event] = item.pull_events()
     assert isinstance(event, StockAdjusted)
     assert (event.batch_id, event.reason) == (expired.batch_id, AdjustmentReason.EXPIRED)
+
+
+def test_reference_is_normalized_and_validated() -> None:
+    assert StockReference("  ORD-9 ") == StockReference("ORD-9")
+    with pytest.raises(ValueError, match="vacía"):
+        StockReference("   ")
+    with pytest.raises(ValueError, match="64"):
+        StockReference("x" * 65)
+
+
+def test_has_reservation() -> None:
+    item = make_item(make_batch(quantity=5, expires_in_days=10))
+    ref = StockReference("ORD-X")
+    item.reserve(reference=ref, quantity=1, expires_at=NOW, today=TODAY)
+
+    assert item.has_reservation(ref)
+    assert not item.has_reservation(StockReference("OTRA"))

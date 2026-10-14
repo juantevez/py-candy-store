@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Self
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -14,6 +14,8 @@ from candy_store.shared.domain.aggregate import AggregateRoot
 from candy_store.shared.infrastructure.outbox import OutboxMessage
 
 _UNIQUE_VIOLATION = "23505"
+# Conflictos transitorios entre transacciones: se resuelven reintentando.
+_RETRYABLE = {"40P01", "40001"}  # deadlock_detected, serialization_failure
 
 
 class SqlAlchemyUnitOfWork(UnitOfWork):
@@ -66,6 +68,11 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
             await self.session.rollback()
             if getattr(exc.orig, "sqlstate", None) == _UNIQUE_VIOLATION:
                 # Dos transacciones crearon el mismo agregado a la vez.
+                raise ConcurrencyError(str(exc.orig)) from exc
+            raise
+        except DBAPIError as exc:
+            await self.session.rollback()
+            if getattr(exc.orig, "sqlstate", None) in _RETRYABLE:
                 raise ConcurrencyError(str(exc.orig)) from exc
             raise
 

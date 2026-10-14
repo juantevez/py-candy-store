@@ -1,8 +1,11 @@
 import logging
 
-from candy_store.inventory.application.ports.repository import InventoryUnitOfWork
+from candy_store.inventory.application.ports.repository import (
+    InventoryOperation,
+    InventoryUnitOfWork,
+)
 from candy_store.inventory.domain.errors import ReservationNotFoundError
-from candy_store.inventory.domain.value_objects import ReservationId, StockLocation
+from candy_store.inventory.domain.value_objects import StockLocation, StockReference
 from candy_store.shared.application.clock import Clock
 from candy_store.shared.application.retry import retry_on_concurrency
 from candy_store.shared.application.unit_of_work import ConcurrencyError
@@ -12,18 +15,23 @@ logger = logging.getLogger(__name__)
 
 
 class ReleaseReservationUseCase:
-    """Checkout abandonado o pago rechazado: devuelve el stock reservado."""
+    """Checkout abandonado o pago rechazado: devuelve el stock reservado de la orden."""
 
     def __init__(self, uow: InventoryUnitOfWork) -> None:
         self._uow = uow
 
     @retry_on_concurrency()
-    async def execute(self, reservation_id: ReservationId) -> None:
+    async def execute(self, reference: StockReference) -> None:
         async with self._uow as uow:
-            item = await uow.items.get_by_reservation(reservation_id)
-            if item is None:
-                raise ReservationNotFoundError(f"No existe la reserva {reservation_id}")
-            item.release_reservation(reservation_id)
+            operation = InventoryOperation.RESERVATION_RELEASE
+            if await uow.operations.get(reference, operation) is not None:
+                return
+            items = await uow.items.list_by_reservation(reference)
+            if not items:
+                raise ReservationNotFoundError(f"No existe una reserva para {reference}")
+            for item in items:
+                item.release_reservation(reference)
+            await uow.operations.add(reference, operation, {})
             await uow.commit()
 
 

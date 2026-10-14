@@ -7,8 +7,8 @@ from candy_store.inventory.domain.value_objects import (
     BatchId,
     ExpirationDate,
     LotNumber,
-    ReservationId,
     StockLocation,
+    StockReference,
 )
 from candy_store.shared.domain.events import DomainEvent
 from candy_store.shared.domain.value_objects import ProductId
@@ -28,15 +28,16 @@ class StockBatchReceived(DomainEvent):
 class StockDeducted(DomainEvent):
     product_id: ProductId
     location: StockLocation
+    reference: StockReference
     allocations: tuple[BatchAllocation, ...]
-    reservation_id: ReservationId | None = None
+    from_reservation: bool
 
 
 @dataclass(frozen=True, kw_only=True)
 class StockReserved(DomainEvent):
     product_id: ProductId
     location: StockLocation
-    reservation_id: ReservationId
+    reference: StockReference
     quantity: int
     expires_at: datetime
 
@@ -45,7 +46,7 @@ class StockReserved(DomainEvent):
 class StockReservationReleased(DomainEvent):
     product_id: ProductId
     location: StockLocation
-    reservation_id: ReservationId
+    reference: StockReference
     quantity: int
     expired: bool
 

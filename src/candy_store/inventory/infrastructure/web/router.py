@@ -1,19 +1,15 @@
-"""Adaptador de entrada HTTP de inventario: traduce requests a comandos de casos de uso."""
+"""Adaptador de entrada HTTP de inventario (back-office): ingresos, ajustes y consultas.
 
-from datetime import timedelta
+Las salidas de stock por ventas no se exponen acá: sales las hace a través de
+`candy_store.inventory.public`, siempre asociadas a una venta u orden.
+"""
+
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 
 from candy_store.inventory.application.ports.repository import InventoryUnitOfWork
-from candy_store.inventory.application.use_cases.confirm_reservation import (
-    ConfirmReservationUseCase,
-)
-from candy_store.inventory.application.use_cases.deduct_stock_fefo import (
-    DeductStockFefoCommand,
-    DeductStockFefoUseCase,
-)
 from candy_store.inventory.application.use_cases.get_stock_summary import (
     GetStockSummaryUseCase,
 )
@@ -27,49 +23,33 @@ from candy_store.inventory.application.use_cases.register_loss_adjustment import
     RegisterLossCommand,
     RegisterLossUseCase,
 )
-from candy_store.inventory.application.use_cases.release_reservations import (
-    ReleaseReservationUseCase,
-)
-from candy_store.inventory.application.use_cases.reserve_stock import (
-    ReserveStockCommand,
-    ReserveStockUseCase,
-)
 from candy_store.inventory.domain.errors import (
     BatchNotFoundError,
     DuplicateBatchError,
-    DuplicateReservationError,
     InsufficientStockError,
-    ReservationNotFoundError,
+    StockShortageError,
 )
-from candy_store.inventory.domain.value_objects import AdjustmentReason, BatchId, ReservationId
+from candy_store.inventory.domain.value_objects import AdjustmentReason, BatchId
 from candy_store.inventory.infrastructure.persistence.unit_of_work import (
     SqlAlchemyInventoryUnitOfWork,
 )
 from candy_store.inventory.infrastructure.web.schemas import (
-    AllocationsResponse,
     AuditCountRequest,
     AuditCountResponse,
     ReceiveBatchRequest,
     ReceiveBatchResponse,
     RegisterLossRequest,
-    ReservationResponse,
-    StockMovementRequest,
     StockSummaryResponse,
 )
 from candy_store.shared.domain.value_objects import ProductId
-from candy_store.shared.infrastructure.web.dependencies import (
-    ClockDep,
-    SessionFactoryDep,
-    SettingsDep,
-)
+from candy_store.shared.infrastructure.web.dependencies import ClockDep, SessionFactoryDep
 from candy_store.shared.infrastructure.web.errors import ErrorStatusMap
 
 ERROR_STATUS: ErrorStatusMap = {
     InsufficientStockError: status.HTTP_409_CONFLICT,
     DuplicateBatchError: status.HTTP_409_CONFLICT,
-    DuplicateReservationError: status.HTTP_409_CONFLICT,
+    StockShortageError: status.HTTP_409_CONFLICT,
     BatchNotFoundError: status.HTTP_404_NOT_FOUND,
-    ReservationNotFoundError: status.HTTP_404_NOT_FOUND,
 }
 
 
@@ -96,46 +76,6 @@ async def receive_batch(
         )
     )
     return ReceiveBatchResponse(batch_id=batch_id.value)
-
-
-@router.post("/deductions")
-async def deduct_stock(
-    body: StockMovementRequest, uow: UowDep, clock: ClockDep
-) -> AllocationsResponse:
-    allocations = await DeductStockFefoUseCase(uow, clock).execute(
-        DeductStockFefoCommand(
-            product_id=ProductId(body.product_id), location=body.location, quantity=body.quantity
-        )
-    )
-    return AllocationsResponse.from_domain(allocations)
-
-
-@router.post("/reservations", status_code=status.HTTP_201_CREATED)
-async def reserve_stock(
-    body: StockMovementRequest, uow: UowDep, clock: ClockDep, settings: SettingsDep
-) -> ReservationResponse:
-    ttl = timedelta(minutes=settings.reservation_ttl_minutes)
-    receipt = await ReserveStockUseCase(uow, clock, ttl).execute(
-        ReserveStockCommand(
-            product_id=ProductId(body.product_id), location=body.location, quantity=body.quantity
-        )
-    )
-    return ReservationResponse(
-        reservation_id=receipt.reservation_id.value, expires_at=receipt.expires_at
-    )
-
-
-@router.post("/reservations/{reservation_id}/confirmation")
-async def confirm_reservation(
-    reservation_id: UUID, uow: UowDep, clock: ClockDep
-) -> AllocationsResponse:
-    allocations = await ConfirmReservationUseCase(uow, clock).execute(ReservationId(reservation_id))
-    return AllocationsResponse.from_domain(allocations)
-
-
-@router.delete("/reservations/{reservation_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def release_reservation(reservation_id: UUID, uow: UowDep) -> None:
-    await ReleaseReservationUseCase(uow).execute(ReservationId(reservation_id))
 
 
 @router.post("/losses", status_code=status.HTTP_204_NO_CONTENT)

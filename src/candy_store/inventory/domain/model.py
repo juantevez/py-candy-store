@@ -29,8 +29,8 @@ from candy_store.inventory.domain.value_objects import (
     BatchId,
     ExpirationDate,
     LotNumber,
-    ReservationId,
     StockLocation,
+    StockReference,
 )
 from candy_store.shared.domain.aggregate import AggregateRoot
 from candy_store.shared.domain.value_objects import ProductId
@@ -98,7 +98,7 @@ class StockReservation:
     `expires_at` (la liberación de vencidas la hace un proceso periódico).
     """
 
-    reservation_id: ReservationId
+    reference: StockReference
     quantity: int
     expires_at: datetime
 
@@ -126,7 +126,7 @@ class InventoryItem(AggregateRoot):
         self.product_id = product_id
         self.location = location
         self._batches = {batch.batch_id: batch for batch in batches}
-        self._reservations = {r.reservation_id: r for r in reservations}
+        self._reservations = {r.reference: r for r in reservations}
 
     # --- Consultas -------------------------------------------------------
 
@@ -149,6 +149,9 @@ class InventoryItem(AggregateRoot):
 
     def available_quantity(self, today: date) -> int:
         return max(0, self.sellable_quantity(today) - self.reserved_quantity())
+
+    def has_reservation(self, reference: StockReference) -> bool:
+        return reference in self._reservations
 
     def expired_batches(self, today: date) -> tuple[StockBatch, ...]:
         return tuple(
@@ -194,43 +197,45 @@ class InventoryItem(AggregateRoot):
 
     # --- Salidas (FEFO) --------------------------------------------------
 
-    def deduct(self, quantity: int, today: date) -> tuple[BatchAllocation, ...]:
+    def deduct(
+        self, quantity: int, today: date, *, reference: StockReference
+    ) -> tuple[BatchAllocation, ...]:
         """Salida inmediata (venta POS): consume stock no reservado aplicando FEFO."""
         _require_positive(quantity)
         available = self.available_quantity(today)
         if quantity > available:
             raise InsufficientStockError(requested=quantity, available=available)
-        return self._consume(quantity, today, reservation_id=None)
+        return self._consume(quantity, today, reference=reference, from_reservation=False)
 
     def reserve(
         self,
         *,
-        reservation_id: ReservationId,
+        reference: StockReference,
         quantity: int,
         expires_at: datetime,
         today: date,
     ) -> None:
         _require_positive(quantity)
-        if reservation_id in self._reservations:
-            raise DuplicateReservationError(f"La reserva {reservation_id} ya existe")
+        if reference in self._reservations:
+            raise DuplicateReservationError(f"Ya existe una reserva para {reference}")
         available = self.available_quantity(today)
         if quantity > available:
             raise InsufficientStockError(requested=quantity, available=available)
-        self._reservations[reservation_id] = StockReservation(
-            reservation_id=reservation_id, quantity=quantity, expires_at=expires_at
+        self._reservations[reference] = StockReservation(
+            reference=reference, quantity=quantity, expires_at=expires_at
         )
         self._record(
             StockReserved(
                 product_id=self.product_id,
                 location=self.location,
-                reservation_id=reservation_id,
+                reference=reference,
                 quantity=quantity,
                 expires_at=expires_at,
             )
         )
 
     def confirm_reservation(
-        self, reservation_id: ReservationId, today: date
+        self, reference: StockReference, today: date
     ) -> tuple[BatchAllocation, ...]:
         """Pago aprobado: la reserva se convierte en salida real de stock por FEFO.
 
@@ -239,20 +244,22 @@ class InventoryItem(AggregateRoot):
         quien confirma primero; si ya no alcanza, falla, la reserva queda intacta y
         el llamador decide (ej. devolver el pago).
         """
-        reservation = self._get_reservation(reservation_id)
-        allocations = self._consume(reservation.quantity, today, reservation_id=reservation_id)
-        del self._reservations[reservation_id]
+        reservation = self._get_reservation(reference)
+        allocations = self._consume(
+            reservation.quantity, today, reference=reference, from_reservation=True
+        )
+        del self._reservations[reference]
         return allocations
 
-    def release_reservation(self, reservation_id: ReservationId) -> None:
-        reservation = self._get_reservation(reservation_id)
+    def release_reservation(self, reference: StockReference) -> None:
+        reservation = self._get_reservation(reference)
         self._release(reservation, expired=False)
 
-    def release_expired_reservations(self, now: datetime) -> tuple[ReservationId, ...]:
+    def release_expired_reservations(self, now: datetime) -> tuple[StockReference, ...]:
         expired = [r for r in self._reservations.values() if r.is_expired(now)]
         for reservation in expired:
             self._release(reservation, expired=True)
-        return tuple(r.reservation_id for r in expired)
+        return tuple(r.reference for r in expired)
 
     # --- Ajustes ---------------------------------------------------------
 
@@ -287,7 +294,7 @@ class InventoryItem(AggregateRoot):
     # --- Internos --------------------------------------------------------
 
     def _consume(
-        self, quantity: int, today: date, *, reservation_id: ReservationId | None
+        self, quantity: int, today: date, *, reference: StockReference, from_reservation: bool
     ) -> tuple[BatchAllocation, ...]:
         allocations = allocate_fefo(self._batches.values(), quantity, today)
         for allocation in allocations:
@@ -296,19 +303,20 @@ class InventoryItem(AggregateRoot):
             StockDeducted(
                 product_id=self.product_id,
                 location=self.location,
+                reference=reference,
                 allocations=allocations,
-                reservation_id=reservation_id,
+                from_reservation=from_reservation,
             )
         )
         return allocations
 
     def _release(self, reservation: StockReservation, *, expired: bool) -> None:
-        del self._reservations[reservation.reservation_id]
+        del self._reservations[reservation.reference]
         self._record(
             StockReservationReleased(
                 product_id=self.product_id,
                 location=self.location,
-                reservation_id=reservation.reservation_id,
+                reference=reservation.reference,
                 quantity=reservation.quantity,
                 expired=expired,
             )
@@ -331,8 +339,8 @@ class InventoryItem(AggregateRoot):
         except KeyError:
             raise BatchNotFoundError(f"No existe el lote {batch_id}") from None
 
-    def _get_reservation(self, reservation_id: ReservationId) -> StockReservation:
+    def _get_reservation(self, reference: StockReference) -> StockReservation:
         try:
-            return self._reservations[reservation_id]
+            return self._reservations[reference]
         except KeyError:
-            raise ReservationNotFoundError(f"No existe la reserva {reservation_id}") from None
+            raise ReservationNotFoundError(f"No existe una reserva para {reference}") from None

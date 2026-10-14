@@ -67,7 +67,7 @@ containers = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Bounded contexts are independent (communicate via events / shared kernel)"
+name = "Bounded contexts are independent (except via each context's public API)"
 type = "independence"
 modules = [
     "candy_store.catalog",
@@ -75,6 +75,22 @@ modules = [
     "candy_store.purchasing",
     "candy_store.sales",
 ]
+# Única excepción: el adaptador (ACL) de sales puede usar la API pública de inventory.
+ignore_imports = [
+    "candy_store.sales.infrastructure.inventory.** -> candy_store.inventory.public",
+]
+
+[[tool.importlinter.contracts]]
+name = "Other contexts only see inventory through inventory.public"
+type = "forbidden"
+source_modules = ["candy_store.catalog", "candy_store.purchasing", "candy_store.sales"]
+forbidden_modules = [
+    "candy_store.inventory.domain",
+    "candy_store.inventory.application",
+    "candy_store.inventory.infrastructure",
+]
+# public.py usa internamente la capa de aplicación; eso es un detalle de inventory.
+allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 name = "Shared kernel does not depend on bounded contexts"

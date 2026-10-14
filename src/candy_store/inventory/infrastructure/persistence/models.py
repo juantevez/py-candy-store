@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -12,7 +13,9 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
+    func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from candy_store.inventory.domain.value_objects import StockLocation
@@ -71,13 +74,27 @@ class StockReservationRow(Base):
     __table_args__ = (
         _item_fk(),
         CheckConstraint("quantity > 0", name="quantity_positive"),
-        Index("ix_inventory_reservations_item", "product_id", "location"),
+        # Confirmar o liberar una orden busca por referencia.
+        Index("ix_inventory_reservations_reference", "reference"),
         # Para el proceso que libera reservas vencidas.
         Index("ix_inventory_reservations_expires_at", "expires_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    product_id: Mapped[uuid.UUID]
-    location: Mapped[str] = mapped_column(String(32))
+    product_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    location: Mapped[str] = mapped_column(String(32), primary_key=True)
+    reference: Mapped[str] = mapped_column(String(64), primary_key=True)
     quantity: Mapped[int]
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ProcessedOperationRow(Base):
+    """Registro de idempotencia: una fila por (referencia, operación) ya aplicada."""
+
+    __tablename__ = "inventory_processed_operations"
+
+    reference: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(32), primary_key=True)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -9,10 +9,6 @@ class BatchId(EntityId):
     pass
 
 
-class ReservationId(EntityId):
-    pass
-
-
 class StockLocation(StrEnum):
     STORE_FRONT = "store_front"  # Salón de ventas
     WAREHOUSE = "warehouse"  # Depósito
@@ -26,6 +22,29 @@ class AdjustmentReason(StrEnum):
 
 
 _MAX_LOT_NUMBER_LENGTH = 64
+_MAX_REFERENCE_LENGTH = 64
+
+
+@dataclass(frozen=True, slots=True)
+class StockReference:
+    """Referencia externa de la operación que mueve stock (ej. id de venta u orden).
+
+    Identifica las reservas de una orden, hace idempotentes las operaciones y deja
+    trazabilidad de qué lotes salieron por cada venta.
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        normalized = self.value.strip()
+        if not normalized:
+            raise ValueError("La referencia no puede estar vacía")
+        if len(normalized) > _MAX_REFERENCE_LENGTH:
+            raise ValueError(f"La referencia excede {_MAX_REFERENCE_LENGTH} caracteres")
+        object.__setattr__(self, "value", normalized)
+
+    def __str__(self) -> str:
+        return self.value
 
 
 @dataclass(frozen=True, slots=True)

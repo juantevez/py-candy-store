@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from candy_store.inventory.application.dto import StockLine
 from candy_store.inventory.application.use_cases.deduct_stock_fefo import (
     DeductStockFefoCommand,
     DeductStockFefoUseCase,
@@ -17,8 +18,8 @@ from candy_store.inventory.domain.value_objects import (
     BatchId,
     ExpirationDate,
     LotNumber,
-    ReservationId,
     StockLocation,
+    StockReference,
 )
 from candy_store.inventory.infrastructure.persistence.models import StockReservationRow
 from candy_store.inventory.infrastructure.persistence.unit_of_work import (
@@ -99,7 +100,13 @@ async def test_fefo_deduction_is_persisted(session_factory: SessionFactory) -> N
 
     await DeductStockFefoUseCase(
         SqlAlchemyInventoryUnitOfWork(session_factory), FixedClock(NOW)
-    ).execute(DeductStockFefoCommand(product_id=product_id, location=LOCATION, quantity=5))
+    ).execute(
+        DeductStockFefoCommand(
+            reference=StockReference("T-1"),
+            location=LOCATION,
+            lines=[StockLine(product_id=product_id, quantity=5)],
+        )
+    )
 
     item = await load(session_factory, product_id)
     on_hand = {b.batch_id: b.quantity_on_hand for b in item.batches}
@@ -107,6 +114,7 @@ async def test_fefo_deduction_is_persisted(session_factory: SessionFactory) -> N
     assert item.version == 3
     deducted = (await outbox(session_factory))[-1]
     assert deducted.event_type == "StockDeducted"
+    assert deducted.payload["reference"] == "T-1"
     assert deducted.payload["allocations"] == [
         {"batch_id": str(sooner), "lot_number": "L-5", "expiration": "2026-10-19", "quantity": 3},
         {"batch_id": str(later), "lot_number": "L-60", "expiration": "2026-12-13", "quantity": 2},
@@ -118,13 +126,13 @@ async def test_reservations_are_persisted_and_removed_on_confirm(
 ) -> None:
     product_id = ProductId.new()
     await receive(session_factory, product_id, quantity=10, expires_in_days=30)
-    reservation_id = ReservationId.new()
+    reference = StockReference("ORD-1")
 
     async with SqlAlchemyInventoryUnitOfWork(session_factory) as uow:
         item = await uow.items.get(product_id, LOCATION)
         assert item is not None
         item.reserve(
-            reservation_id=reservation_id,
+            reference=reference,
             quantity=4,
             expires_at=NOW + timedelta(minutes=15),
             today=TODAY,
@@ -138,7 +146,7 @@ async def test_reservations_are_persisted_and_removed_on_confirm(
     async with SqlAlchemyInventoryUnitOfWork(session_factory) as uow:
         item = await uow.items.get(product_id, LOCATION)
         assert item is not None
-        item.confirm_reservation(reservation_id, TODAY)
+        item.confirm_reservation(reference, TODAY)
         await uow.commit()
 
     reloaded = await load(session_factory, product_id)
@@ -161,8 +169,8 @@ async def test_concurrent_modification_is_rejected(session_factory: SessionFacto
         web_item = await web.items.get(product_id, LOCATION)
         assert pos_item is not None
         assert web_item is not None
-        pos_item.deduct(7, TODAY)
-        web_item.deduct(7, TODAY)
+        pos_item.deduct(7, TODAY, reference=StockReference("POS-1"))
+        web_item.deduct(7, TODAY, reference=StockReference("POS-2"))
 
         await pos.commit()
         with pytest.raises(ConcurrencyError):
@@ -210,7 +218,7 @@ async def test_changes_without_commit_are_discarded(session_factory: SessionFact
     async with SqlAlchemyInventoryUnitOfWork(session_factory) as uow:
         item = await uow.items.get(product_id, LOCATION)
         assert item is not None
-        item.deduct(10, TODAY)
+        item.deduct(10, TODAY, reference=StockReference("POS-1"))
 
     assert (await load(session_factory, product_id)).quantity_on_hand() == 10
     assert len(await outbox(session_factory)) == 1

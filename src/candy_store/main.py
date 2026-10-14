@@ -5,6 +5,7 @@ Ejecutar: uv run uvicorn candy_store.main:create_app --factory --reload
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import FastAPI
 
@@ -15,6 +16,8 @@ from candy_store.inventory.infrastructure.persistence.unit_of_work import (
     SqlAlchemyInventoryUnitOfWork,
 )
 from candy_store.inventory.infrastructure.web import router as inventory_web
+from candy_store.inventory.public import InventoryFacade
+from candy_store.sales.infrastructure.inventory.stock_gateway import InProcessStockGateway
 from candy_store.shared.infrastructure.background import PeriodicTask
 from candy_store.shared.infrastructure.clock import SystemClock
 from candy_store.shared.infrastructure.database import create_engine, create_session_factory
@@ -39,6 +42,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.clock = clock
         app.state.event_bus = event_bus
+
+        # Comunicación entre contextos: sales usa inventory en proceso a través
+        # de su API pública, envuelta en el StockGateway propio de sales.
+        inventory_facade = InventoryFacade(
+            uow_factory=lambda: SqlAlchemyInventoryUnitOfWork(session_factory),
+            clock=clock,
+            reservation_ttl=timedelta(minutes=settings.reservation_ttl_minutes),
+        )
+        app.state.stock_gateway = InProcessStockGateway(inventory_facade)
 
         tasks = [
             PeriodicTask(

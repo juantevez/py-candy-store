@@ -1,29 +1,28 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from candy_store.inventory.application.ports.repository import InventoryUnitOfWork
-from candy_store.inventory.domain.errors import InsufficientStockError
-from candy_store.inventory.domain.value_objects import ReservationId, StockLocation
+from candy_store.inventory.application.dto import ReservationReceipt, StockLine, normalize_lines
+from candy_store.inventory.application.ports.repository import (
+    InventoryOperation,
+    InventoryUnitOfWork,
+)
+from candy_store.inventory.application.use_cases._lines import load_items_covering
+from candy_store.inventory.domain.value_objects import StockLocation, StockReference
 from candy_store.shared.application.clock import Clock
 from candy_store.shared.application.retry import retry_on_concurrency
-from candy_store.shared.domain.value_objects import ProductId
 
 
 @dataclass(frozen=True, slots=True)
 class ReserveStockCommand:
-    product_id: ProductId
+    reference: StockReference
     location: StockLocation
-    quantity: int
-
-
-@dataclass(frozen=True, slots=True)
-class ReservationReceipt:
-    reservation_id: ReservationId
-    expires_at: datetime
+    lines: Sequence[StockLine]
 
 
 class ReserveStockUseCase:
-    """Aparta stock durante el checkout online hasta que se confirme el pago."""
+    """Checkout online: aparta todas las líneas de la orden (todo o nada) hasta que
+    se confirme el pago o venza el TTL. Idempotente por referencia."""
 
     def __init__(self, uow: InventoryUnitOfWork, clock: Clock, ttl: timedelta) -> None:
         self._uow = uow
@@ -32,18 +31,24 @@ class ReserveStockUseCase:
 
     @retry_on_concurrency()
     async def execute(self, command: ReserveStockCommand) -> ReservationReceipt:
-        receipt = ReservationReceipt(
-            reservation_id=ReservationId.new(), expires_at=self._clock.now() + self._ttl
-        )
+        lines = normalize_lines(command.lines)
+        today = self._clock.today()
         async with self._uow as uow:
-            item = await uow.items.get(command.product_id, command.location)
-            if item is None:
-                raise InsufficientStockError(requested=command.quantity, available=0)
-            item.reserve(
-                reservation_id=receipt.reservation_id,
-                quantity=command.quantity,
-                expires_at=receipt.expires_at,
-                today=self._clock.today(),
+            stored = await uow.operations.get(command.reference, InventoryOperation.RESERVATION)
+            if stored is not None:
+                return ReservationReceipt.from_json(stored)
+
+            receipt = ReservationReceipt(expires_at=self._clock.now() + self._ttl)
+            items = await load_items_covering(uow, command.location, lines, today)
+            for item, line in zip(items, lines, strict=True):
+                item.reserve(
+                    reference=command.reference,
+                    quantity=line.quantity,
+                    expires_at=receipt.expires_at,
+                    today=today,
+                )
+            await uow.operations.add(
+                command.reference, InventoryOperation.RESERVATION, receipt.to_json()
             )
             await uow.commit()
         return receipt

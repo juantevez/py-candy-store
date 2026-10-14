@@ -3,7 +3,7 @@ siguen en el dominio."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -14,7 +14,7 @@ from candy_store.inventory.application.use_cases.get_stock_summary import (
     LocationStock,
     StockSummary,
 )
-from candy_store.inventory.domain.value_objects import BatchAllocation, StockLocation
+from candy_store.inventory.domain.value_objects import StockLocation
 
 LotNumberStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 
@@ -33,41 +33,6 @@ class ReceiveBatchRequest(_Request):
 
 class ReceiveBatchResponse(BaseModel):
     batch_id: UUID
-
-
-class StockMovementRequest(_Request):
-    product_id: UUID
-    location: StockLocation
-    quantity: PositiveInt
-
-
-class BatchAllocationOut(BaseModel):
-    batch_id: UUID
-    lot_number: str
-    expiration: date
-    quantity: int
-
-    @classmethod
-    def from_domain(cls, allocation: BatchAllocation) -> BatchAllocationOut:
-        return cls(
-            batch_id=allocation.batch_id.value,
-            lot_number=allocation.lot_number.value,
-            expiration=allocation.expiration.value,
-            quantity=allocation.quantity,
-        )
-
-
-class AllocationsResponse(BaseModel):
-    allocations: list[BatchAllocationOut]
-
-    @classmethod
-    def from_domain(cls, allocations: tuple[BatchAllocation, ...]) -> AllocationsResponse:
-        return cls(allocations=[BatchAllocationOut.from_domain(a) for a in allocations])
-
-
-class ReservationResponse(BaseModel):
-    reservation_id: UUID
-    expires_at: datetime
 
 
 class RegisterLossRequest(_Request):

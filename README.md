@@ -41,13 +41,16 @@ por `import-linter`) es que un adaptador puede usar la **API pública** de otro
 contexto:
 
 ```
-sales.application ──► StockGateway (puerto de sales, en su lenguaje)
+sales.application ──► StockGateway / ProductCatalog (puertos de sales, en su lenguaje)
                            ▲
-sales.infrastructure.inventory.InProcessStockGateway  (anti-corruption layer)
+sales.infrastructure.{inventory,catalog}  (anti-corruption layers)
                            │
                            ▼
-                inventory.public.InventoryFacade  ──► casos de uso de inventory
+        inventory.public.InventoryFacade / catalog.public.CatalogFacade
 ```
+
+Inventory → sales es asincrónico: cuando vence una reserva, el evento
+`StockReservationReleased` (vía outbox) hace que sales cancele la orden.
 
 - **Sincrónico** cuando sales necesita la respuesta en el acto: venta de mostrador,
   reserva en el checkout, confirmación con el pago.
@@ -56,20 +59,55 @@ sales.infrastructure.inventory.InProcessStockGateway  (anti-corruption layer)
 - **Eventos (outbox)** para lo que puede ser asincrónico: avisos y trazabilidad
   (cada `StockDeducted` lleva la referencia de la venta y los lotes que salieron).
 
-## API de inventario (back-office)
+## API
 
-| Método | Ruta                                      | Uso                                   |
-|--------|-------------------------------------------|---------------------------------------|
-| POST   | `/inventory/batches`                      | Ingreso de un lote                    |
-| POST   | `/inventory/losses`                       | Merma, rotura o baja por vencimiento  |
-| POST   | `/inventory/audit-counts`                 | Corrección por conteo físico          |
-| GET    | `/inventory/products/{product_id}/stock`  | Stock por ubicación y lote            |
+| Método | Ruta                                              | Uso                                      |
+|--------|---------------------------------------------------|------------------------------------------|
+| POST   | `/catalog/products`                               | Alta de producto (SKU, nombre, precio)   |
+| GET    | `/catalog/products`, `/catalog/products/{id}`     | Consulta del catálogo                    |
+| PATCH  | `/catalog/products/{id}`                          | Cambio de nombre, precio o activo        |
+| POST   | `/inventory/batches`                              | Ingreso de un lote                       |
+| POST   | `/inventory/losses`                               | Merma, rotura o baja por vencimiento     |
+| POST   | `/inventory/audit-counts`                         | Corrección por conteo físico             |
+| GET    | `/inventory/products/{product_id}/stock`          | Stock por ubicación y lote               |
+| POST   | `/sales/counter-sales`                            | Venta de mostrador (descuenta del salón) |
+| POST   | `/sales/checkouts`                                | Checkout web: reserva + pago MercadoPago |
+| GET    | `/sales/orders/{order_id}`                        | Estado de una orden                      |
+| POST   | `/sales/webhooks/mercadopago`                     | Notificaciones de pago (firmadas)        |
 
-Las salidas de stock por ventas no se exponen por HTTP en inventory: siempre pasan
-por sales, asociadas a una venta u orden.
+Las salidas de stock solo ocurren a través de ventas. `order_id` lo genera el
+cliente (caja o frontend): reenviar el mismo pedido no lo duplica.
 
-Los errores de negocio responden `{"code", "detail", ...}`: 409 para conflictos de
-stock o concurrencia, 404 para recursos inexistentes, 422 para el resto.
+Los errores de negocio responden `{"code", "detail", ...}`: 409 para conflictos
+(stock, estado de la orden, concurrencia), 404 para recursos inexistentes, 502 si
+MercadoPago no responde, 422 para el resto.
+
+## Ciclo de vida de una orden
+
+```
+Mostrador: placed ──► completed                 (cancelled si no hay stock)
+Online:    placed ──► awaiting_payment ──► paid
+                 │            │
+                 │            ├──► cancelled        (venció la reserva sin pago aprobado)
+                 │            └──► refund_required  (pago aprobado sin stock / monto distinto)
+                 └──► cancelled                     (sin stock o falla de MercadoPago)
+```
+
+Un pago rechazado no cancela la orden: en Checkout Pro el comprador puede
+reintentar con otro medio mientras la reserva siga vigente. La preferencia de
+pago vence junto con la reserva de stock.
+
+## MercadoPago
+
+Variables (`.env.example`): `CANDY_MERCADOPAGO_ACCESS_TOKEN`,
+`CANDY_MERCADOPAGO_WEBHOOK_SECRET` (panel de MercadoPago > Webhooks),
+`CANDY_PUBLIC_BASE_URL` (URL pública de esta API, para las notificaciones) y
+`CANDY_STOREFRONT_URL` (a dónde vuelve el comprador). Sin la clave secreta del
+webhook se rechazan todas las notificaciones.
+
+El webhook valida la firma `x-signature` y nunca confía en el contenido de la
+notificación: consulta el pago a la API de MercadoPago y verifica que el monto
+coincida con el total de la orden.
 
 ## Decisiones de diseño
 

@@ -14,6 +14,17 @@ class Settings(BaseSettings):
     reservation_ttl_minutes: int = 15
     reservation_sweep_interval_seconds: float = 30.0
 
+    # URL pública de esta API (MercadoPago envía las notificaciones acá).
+    public_base_url: str = "http://localhost:8000"
+    # URL del frontend de la tienda (a dónde vuelve el comprador después de pagar).
+    storefront_url: str = "http://localhost:3000"
+    mercadopago_api_url: str = "https://api.mercadopago.com"
+    mercadopago_access_token: str = ""
+    # Clave secreta del webhook (panel de MercadoPago > Webhooks). Sin ella se
+    # rechazan todas las notificaciones.
+    mercadopago_webhook_secret: str = ""
+    mercadopago_timeout_seconds: float = 10.0
+
 
 @lru_cache
 def get_settings() -> Settings:

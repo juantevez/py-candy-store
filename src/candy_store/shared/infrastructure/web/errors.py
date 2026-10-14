@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from candy_store.shared.application.unit_of_work import ConcurrencyError
 from candy_store.shared.domain.errors import DomainError
+from candy_store.shared.infrastructure.serialization import to_json_value
 
 type ErrorStatusMap = Mapping[type[Exception], int]
 
@@ -19,18 +20,23 @@ def error_code(exc: Exception) -> str:
 
 
 def _error_body(exc: Exception) -> dict[str, object]:
-    # Atributos primitivos del error (ej. requested/available) como contexto para el cliente.
-    context = {
-        key: value
-        for key, value in vars(exc).items()
-        if not key.startswith("_") and isinstance(value, str | int | float | bool)
-    }
+    # Atributos públicos del error (ej. requested/available, productos sin stock)
+    # como contexto para el cliente. Lo que no es serializable se omite.
+    context: dict[str, object] = {}
+    for key, value in vars(exc).items():
+        if key.startswith("_"):
+            continue
+        try:
+            context[key] = to_json_value(value)
+        except TypeError:
+            continue
     return {"code": error_code(exc), "detail": str(exc), **context}
 
 
 def install_error_handlers(app: FastAPI, statuses: ErrorStatusMap) -> None:
-    """Registra handlers para errores de dominio. Cada contexto aporta su mapa
-    error -> status; se resuelve por herencia y por defecto se responde 422."""
+    """Registra handlers para errores de negocio. Cada contexto aporta su mapa
+    error -> status; se resuelve por herencia. Los errores de dominio no mapeados
+    responden 422."""
 
     def resolve_status(exc: Exception) -> int:
         for cls in type(exc).__mro__:
@@ -38,7 +44,7 @@ def install_error_handlers(app: FastAPI, statuses: ErrorStatusMap) -> None:
                 return statuses[cls]
         return status.HTTP_422_UNPROCESSABLE_CONTENT
 
-    async def handle_domain_error(request: Request, exc: Exception) -> JSONResponse:
+    async def handle_error(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=resolve_status(exc), content=_error_body(exc))
 
     async def handle_concurrency_error(request: Request, exc: Exception) -> JSONResponse:
@@ -50,5 +56,8 @@ def install_error_handlers(app: FastAPI, statuses: ErrorStatusMap) -> None:
             },
         )
 
-    app.add_exception_handler(DomainError, handle_domain_error)
+    app.add_exception_handler(DomainError, handle_error)
+    for error_type in statuses:
+        if not issubclass(error_type, DomainError):
+            app.add_exception_handler(error_type, handle_error)
     app.add_exception_handler(ConcurrencyError, handle_concurrency_error)

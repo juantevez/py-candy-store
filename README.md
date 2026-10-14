@@ -15,11 +15,43 @@ Monolito modular en Python con arquitectura hexagonal y DDD.
 Cada contexto tiene `domain/` → `application/` → `infrastructure/`. Las reglas de
 dependencia se verifican con `import-linter` (ver `pyproject.toml`).
 
+## Entorno local completo (para el front)
+
+```bash
+docker compose up -d --build        # base + migraciones + API + MercadoPago simulado
+uv run python tools/smoke_test.py   # recorre todos los endpoints (54 verificaciones)
+```
+
+| Servicio               | URL                                   |
+|------------------------|---------------------------------------|
+| API                    | http://localhost:8000                 |
+| Swagger / OpenAPI      | http://localhost:8000/docs · `/openapi.json` (para generar el cliente) |
+| MercadoPago simulado   | http://localhost:8099                 |
+| PostgreSQL             | localhost:5433 (`candy` / `candy`)    |
+
+Notas para integrar el front:
+
+- **CORS** habilitado para `http://localhost:3000` y `:5173` (`CANDY_CORS_ORIGINS`).
+- **`order_id` lo genera el front** (UUID v4) al confirmar la venta o iniciar el
+  checkout. Si la request falla o hay timeout, reintentar con el **mismo** id: no se
+  duplica la venta ni se descuenta stock dos veces.
+- **Checkout web:** `POST /sales/checkouts` devuelve `redirect_url`; el front
+  redirige ahí. En local es la página del simulador (botones Aprobar / Rechazar /
+  Pendiente), que envía el webhook firmado a la API y vuelve a
+  `CANDY_STOREFRONT_URL/checkout/{exito|error|pendiente}?payment_id=...&status=...&external_reference=<order_id>`.
+  La página de retorno debe consultar `GET /sales/orders/{order_id}` para el estado
+  real (el parámetro `status` de la URL es solo informativo).
+- **Errores:** `{"code": "...", "detail": "...", ...contexto}`. Ej.: `out_of_stock`
+  trae `items` con `requested`/`available` por producto para mostrar al usuario.
+- El stock que entra por un remito aparece unos segundos después (procesamiento
+  asincrónico).
+- La autenticación queda a cargo del gateway / servicio de login: esta API no la valida.
+
 ## Desarrollo
 
 ```bash
 uv sync                                  # dependencias
-docker compose up -d --wait              # PostgreSQL en localhost:5433 (+ base de tests)
+docker compose up -d --wait postgres     # solo PostgreSQL en localhost:5433 (+ base de tests)
 uv run alembic upgrade head              # migraciones
 
 uv run pytest                            # todos los tests
@@ -49,8 +81,10 @@ sales.infrastructure.{inventory,catalog}  (anti-corruption layers)
         inventory.public.InventoryFacade / catalog.public.CatalogFacade
 ```
 
-Inventory → sales es asincrónico: cuando vence una reserva, el evento
-`StockReservationReleased` (vía outbox) hace que sales cancele la orden.
+Integraciones asincrónicas (eventos vía outbox, suscriptores idempotentes):
+
+- `StockReservationReleased` (inventory → sales): si venció la reserva, sales cancela la orden.
+- `RemittanceReceived` (purchasing → inventory): al aceptar un remito, inventory ingresa los lotes.
 
 - **Sincrónico** cuando sales necesita la respuesta en el acto: venta de mostrador,
   reserva en el checkout, confirmación con el pago.
@@ -72,6 +106,11 @@ Inventory → sales es asincrónico: cuando vence una reserva, el evento
 | POST   | `/inventory/audit-counts`                         | Corrección por conteo físico             |
 | POST   | `/inventory/kit-assemblies`                       | Armado de kits pre-armados               |
 | GET    | `/inventory/products/{product_id}/stock`          | Stock por ubicación y lote               |
+| POST   | `/purchasing/suppliers`, GET `/purchasing/suppliers` | Alta y consulta de proveedores        |
+| POST   | `/purchasing/orders`, GET `/purchasing/orders/{id}`  | Órdenes de compra                     |
+| POST   | `/purchasing/orders/{id}/cancellation`            | Anular una orden sin recepciones         |
+| POST   | `/purchasing/orders/{id}/closure`                 | Cerrar una orden con faltantes           |
+| POST   | `/purchasing/remittances`                         | Recepción de un remito en depósito       |
 | POST   | `/sales/counter-sales`                            | Venta de mostrador (descuenta del salón) |
 | POST   | `/sales/checkouts`                                | Checkout web: reserva + pago MercadoPago |
 | GET    | `/sales/orders/{order_id}`                        | Estado de una orden                      |
@@ -83,6 +122,20 @@ cliente (caja o frontend): reenviar el mismo pedido no lo duplica.
 Los errores de negocio responden `{"code", "detail", ...}`: 409 para conflictos
 (stock, estado de la orden, concurrencia), 404 para recursos inexistentes, 502 si
 MercadoPago no responde, 422 para el resto.
+
+## Compras y recepción de remitos
+
+1. Se registra el proveedor (CUIT validado) y se emite la orden de compra con
+   cantidades y costos. Solo se compran productos del catálogo que no sean kits.
+2. Al llegar la mercadería, el depósito carga el remito (`0001-00012345`) con
+   **lote y vencimiento** de cada línea; un producto puede venir en varios lotes.
+3. **Cruce con la orden:** si trae productos no pedidos o más de lo pendiente, el
+   remito se rechaza completo (422 con todas las diferencias). Si trae menos, la
+   orden queda `partially_received`. No se acepta mercadería vencida.
+4. Aceptado el remito, `RemittanceReceived` hace que inventory ingrese los lotes
+   (unos segundos después, vía outbox). Cargar dos veces el mismo remito no duplica nada.
+5. Una orden sin recepciones se puede **anular**; una parcialmente recibida cuyos
+   faltantes ya no van a llegar se **cierra**.
 
 ## Kits pre-armados
 

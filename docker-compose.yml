@@ -1,3 +1,15 @@
+# Entorno local completo:  docker compose up -d --build
+#   API:                    http://localhost:8000   (Swagger en /docs)
+#   MercadoPago simulado:   http://localhost:8099
+#   PostgreSQL:             localhost:5433 (candy/candy, bases candy_store y candy_store_test)
+# Solo la base (para correr la API con uv):  docker compose up -d postgres
+
+x-api-image: &api-image
+  build: .
+  image: candy-store-api:dev
+
+x-database-url: &database-url postgresql+asyncpg://candy:candy@postgres:5432/candy_store
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -16,6 +28,51 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+
+  migrate:
+    <<: *api-image
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      CANDY_DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *api-image
+    container_name: candy-store-api
+    ports:
+      - "8000:8000"
+    environment:
+      CANDY_DATABASE_URL: *database-url
+      # MercadoPago simulado (para desarrollo; nunca credenciales reales acá).
+      CANDY_MERCADOPAGO_API_URL: http://mp-mock:8099
+      CANDY_MERCADOPAGO_ACCESS_TOKEN: TEST-mock-token
+      CANDY_MERCADOPAGO_WEBHOOK_SECRET: dev-webhook-secret
+      CANDY_PUBLIC_BASE_URL: http://api:8000
+      CANDY_STOREFRONT_URL: http://localhost:3000
+      CANDY_CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173"]'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mp-mock:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mp-mock:
+    <<: *api-image
+    container_name: candy-store-mp-mock
+    command: ["uvicorn", "tools.mercadopago_mock:app", "--host", "0.0.0.0", "--port", "8099"]
+    ports:
+      - "8099:8099"
+    environment:
+      MP_MOCK_WEBHOOK_SECRET: dev-webhook-secret
+      MP_MOCK_PUBLIC_URL: http://localhost:8099
 
 volumes:
   candy-store-pgdata:

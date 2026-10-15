@@ -61,3 +61,15 @@ class GetOrderUseCase:
         if order is None:
             raise OrderNotFoundError(f"No existe la orden {order_id}")
         return OrderView.of(order)
+
+
+class ListRecentOrdersUseCase:
+    def __init__(self, uow: SalesUnitOfWork) -> None:
+        self._uow = uow
+
+    async def execute(
+        self, *, channel: SalesChannel | None = None, limit: int = 20
+    ) -> list[OrderView]:
+        async with self._uow as uow:
+            orders = await uow.orders.list_recent(channel=channel, limit=limit)
+        return [OrderView.of(order) for order in orders]

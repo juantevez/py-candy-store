@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -21,8 +21,17 @@ from candy_store.sales.application.ports.stock import ItemQuantity, OutOfStockEr
 from candy_store.sales.application.use_cases.checkout_online_cart import (
     CheckoutOnlineCartCommand,
     CheckoutOnlineCartUseCase,
+    HoldPolicy,
 )
-from candy_store.sales.application.use_cases.get_order import GetOrderUseCase, OrderView
+from candy_store.sales.application.use_cases.confirm_bank_transfer import (
+    ConfirmBankTransferCommand,
+    ConfirmBankTransferUseCase,
+)
+from candy_store.sales.application.use_cases.get_order import (
+    GetOrderUseCase,
+    ListRecentOrdersUseCase,
+    OrderView,
+)
 from candy_store.sales.application.use_cases.handle_payment_webhook import (
     HandlePaymentNotificationUseCase,
 )
@@ -35,7 +44,7 @@ from candy_store.sales.domain.errors import (
     OrderNotFoundError,
     ProductNotSellableError,
 )
-from candy_store.sales.domain.value_objects import OrderId, PaymentMethod
+from candy_store.sales.domain.value_objects import OrderId, PaymentMethod, SalesChannel
 from candy_store.sales.infrastructure.external.mercadopago import verify_webhook_signature
 from candy_store.sales.infrastructure.persistence.unit_of_work import SqlAlchemySalesUnitOfWork
 from candy_store.shared.domain.value_objects import ProductId
@@ -111,6 +120,13 @@ class CheckoutRequestIn(_Request):
         Annotated[str, StringConstraints(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=254)]
         | None
     ) = None
+    payment_method: Literal["mercadopago", "bank_transfer"] = "mercadopago"
+
+
+class TransferConfirmationIn(_Request):
+    bank_reference: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)] | None
+    ) = Field(default=None, description="Número de operación del banco (opcional)")
 
 
 class OrderLineOut(BaseModel):
@@ -162,12 +178,26 @@ class OrderResponse(BaseModel):
         )
 
 
+class TransferInstructions(BaseModel):
+    """Datos que el comprador necesita para transferir."""
+
+    alias: str
+    cbu: str
+    holder: str
+    bank: str
+    amount: Decimal
+    currency: str
+    reference: str = Field(description="Para indicar en el concepto de la transferencia")
+
+
 class CheckoutResponse(BaseModel):
     order_id: UUID
-    redirect_url: str
+    payment_method: str
+    redirect_url: str | None = Field(description="Solo Mercado Pago: a dónde redirigir")
     expires_at: datetime
     total: Decimal
     currency: str
+    transfer: TransferInstructions | None = Field(description="Solo transferencia")
 
 
 def _items(items: list[ItemIn]) -> list[ItemQuantity]:
@@ -201,21 +231,75 @@ async def checkout(
     catalog: CatalogDep,
     payments: PaymentsDep,
     clock: ClockDep,
+    settings: SettingsDep,
 ) -> CheckoutResponse:
-    result = await CheckoutOnlineCartUseCase(uow, stock, catalog, payments, clock).execute(
+    holds = HoldPolicy(
+        mercadopago=timedelta(minutes=settings.reservation_ttl_minutes),
+        bank_transfer=timedelta(hours=settings.transfer_hold_hours),
+    )
+    result = await CheckoutOnlineCartUseCase(
+        uow, stock, catalog, payments, clock, holds=holds
+    ).execute(
         CheckoutOnlineCartCommand(
             order_id=OrderId(body.order_id),
             items=_items(body.items),
             customer_email=body.customer_email,
+            payment_method=PaymentMethod(body.payment_method),
         )
     )
+    transfer = None
+    if result.payment_method is PaymentMethod.BANK_TRANSFER:
+        transfer = TransferInstructions(
+            alias=settings.transfer_alias,
+            cbu=settings.transfer_cbu,
+            holder=settings.transfer_holder,
+            bank=settings.transfer_bank,
+            amount=result.total.amount,
+            currency=result.total.currency,
+            reference=transfer_reference(result.order_id),
+        )
     return CheckoutResponse(
         order_id=result.order_id.value,
+        payment_method=result.payment_method,
         redirect_url=result.redirect_url,
         expires_at=result.expires_at,
         total=result.total.amount,
         currency=result.total.currency,
+        transfer=transfer,
     )
+
+
+def transfer_reference(order_id: OrderId) -> str:
+    """Referencia corta para el concepto de la transferencia (identifica la orden)."""
+    return f"CANDY-{str(order_id)[:8].upper()}"
+
+
+@router.post("/orders/{order_id}/transfer-confirmation")
+async def confirm_bank_transfer(
+    order_id: UUID,
+    uow: UowDep,
+    stock: StockDep,
+    clock: ClockDep,
+    body: TransferConfirmationIn | None = None,
+) -> OrderResponse:
+    """Uso interno: el personal confirma que la transferencia se acreditó."""
+    view = await ConfirmBankTransferUseCase(uow, stock, clock).execute(
+        ConfirmBankTransferCommand(
+            order_id=OrderId(order_id), bank_reference=body.bank_reference if body else None
+        )
+    )
+    return OrderResponse.of(view)
+
+
+@router.get("/orders")
+async def list_recent_orders(
+    uow: UowDep,
+    channel: SalesChannel | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[OrderResponse]:
+    """Últimas órdenes, las más recientes primero (ej. `channel=counter` para la caja)."""
+    views = await ListRecentOrdersUseCase(uow).execute(channel=channel, limit=limit)
+    return [OrderResponse.of(view) for view in views]
 
 
 @router.get("/orders/{order_id}")

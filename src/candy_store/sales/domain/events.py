@@ -28,13 +28,14 @@ class CounterSaleCompleted(DomainEvent):
 @dataclass(frozen=True, kw_only=True)
 class OrderAwaitingPayment(DomainEvent):
     order_id: OrderId
-    checkout_id: str
+    payment_method: PaymentMethod
+    checkout_id: str | None
 
 
 @dataclass(frozen=True, kw_only=True)
 class OrderPaid(DomainEvent):
     order_id: OrderId
-    payment_id: str
+    payment_id: str | None  # id del pago en la pasarela o referencia bancaria
     total: Money
 
 

@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from candy_store.sales.application.ports.payment_gateway import (
     CheckoutItem,
@@ -19,12 +19,14 @@ from candy_store.sales.application.use_cases._orders import (
     stock_items,
     update_order,
 )
-from candy_store.sales.domain.errors import InvalidOrderStateError
-from candy_store.sales.domain.model import Order
+from candy_store.sales.domain.errors import InvalidOrderError, InvalidOrderStateError
+from candy_store.sales.domain.model import ONLINE_PAYMENT_METHODS, Order
 from candy_store.sales.domain.value_objects import (
     CancellationReason,
+    CheckoutSession,
     OrderId,
     OrderStatus,
+    PaymentMethod,
     SalesChannel,
 )
 from candy_store.shared.application.clock import Clock
@@ -40,22 +42,37 @@ class CheckoutOnlineCartCommand:
     order_id: OrderId
     items: Sequence[ItemQuantity]
     customer_email: str | None = None
+    payment_method: PaymentMethod = PaymentMethod.MERCADOPAGO
 
 
 @dataclass(frozen=True, slots=True)
 class CheckoutResult:
     order_id: OrderId
-    redirect_url: str
+    payment_method: PaymentMethod
+    redirect_url: str | None  # solo Mercado Pago: a dónde redirigir al comprador
     expires_at: datetime
     total: Money
 
 
+@dataclass(frozen=True, slots=True)
+class HoldPolicy:
+    """Cuánto tiempo se aparta el stock esperando cada medio de pago."""
+
+    mercadopago: timedelta = timedelta(minutes=15)
+    # Una transferencia no es instantánea: alguien tiene que verla acreditada.
+    bank_transfer: timedelta = timedelta(hours=24)
+
+    def for_method(self, method: PaymentMethod) -> timedelta:
+        return self.bank_transfer if method is PaymentMethod.BANK_TRANSFER else self.mercadopago
+
+
 class CheckoutOnlineCartUseCase:
-    """Inicio del checkout web: reserva temporal de stock + sesión de pago.
+    """Inicio del checkout web: reserva temporal de stock y, según el medio de pago,
+    sesión de Mercado Pago o espera de la transferencia.
 
     Pasos (cada uno idempotente): crear la orden, apartar el stock, crear la
-    preferencia de pago y dejar la orden esperando el pago. Si la pasarela falla,
-    se libera el stock y la orden se cancela.
+    preferencia de pago (solo Mercado Pago) y dejar la orden esperando el pago. Si
+    la pasarela falla, se libera el stock y la orden se cancela.
     """
 
     def __init__(
@@ -65,15 +82,21 @@ class CheckoutOnlineCartUseCase:
         catalog: ProductCatalog,
         payments: PaymentGateway,
         clock: Clock,
+        holds: HoldPolicy | None = None,
     ) -> None:
         self._uow = uow
         self._stock = stock
         self._catalog = catalog
         self._payments = payments
         self._clock = clock
+        self._holds = holds or HoldPolicy()
 
     @retry_on_concurrency()
     async def execute(self, command: CheckoutOnlineCartCommand) -> CheckoutResult:
+        method = command.payment_method
+        if method not in ONLINE_PAYMENT_METHODS:
+            raise InvalidOrderError(f"Medio de pago no disponible para compras online: {method}")
+
         order = await find_order(self._uow, command.order_id)
         if order is None:
             order = Order.place(
@@ -93,13 +116,27 @@ class CheckoutOnlineCartUseCase:
             raise InvalidOrderStateError(f"La orden {order.order_id} está {order.status}")
 
         try:
-            expires_at = await self._stock.hold_for_online_order(order.order_id, stock_items(order))
+            expires_at = await self._stock.hold_for_online_order(
+                order.order_id, stock_items(order), hold_for=self._holds.for_method(method)
+            )
         except OutOfStockError:
             await self._cancel(order.order_id, CancellationReason.OUT_OF_STOCK)
             raise
 
+        session = None
+        if method is PaymentMethod.MERCADOPAGO:
+            session = await self._create_payment_session(order, expires_at)
+
+        awaiting = await update_order(
+            self._uow,
+            order.order_id,
+            lambda o: o.await_payment(method, expires_at, checkout=session),
+        )
+        return _result(awaiting)
+
+    async def _create_payment_session(self, order: Order, expires_at: datetime) -> CheckoutSession:
         try:
-            session = await self._payments.create_checkout(
+            return await self._payments.create_checkout(
                 CheckoutRequest(
                     order_id=order.order_id,
                     items=tuple(
@@ -121,21 +158,17 @@ class CheckoutOnlineCartUseCase:
             await self._cancel(order.order_id, CancellationReason.CHECKOUT_FAILED)
             raise
 
-        awaiting = await update_order(
-            self._uow, order.order_id, lambda o: o.await_payment(session, expires_at)
-        )
-        return _result(awaiting)
-
     async def _cancel(self, order_id: OrderId, reason: CancellationReason) -> None:
         await update_order(self._uow, order_id, lambda o: o.cancel(reason, self._clock.now()))
 
 
 def _result(order: Order) -> CheckoutResult:
-    if order.checkout is None or order.hold_expires_at is None:
+    if order.payment_method is None or order.hold_expires_at is None:
         raise InvalidOrderStateError(f"La orden {order.order_id} no tiene un checkout iniciado")
     return CheckoutResult(
         order_id=order.order_id,
-        redirect_url=order.checkout.redirect_url,
+        payment_method=order.payment_method,
+        redirect_url=order.checkout.redirect_url if order.checkout else None,
         expires_at=order.hold_expires_at,
         total=order.total,
     )

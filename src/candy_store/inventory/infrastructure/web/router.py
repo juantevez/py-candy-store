@@ -18,6 +18,9 @@ from candy_store.inventory.application.use_cases.assemble_kits import (
 from candy_store.inventory.application.use_cases.get_stock_summary import (
     GetStockSummaryUseCase,
 )
+from candy_store.inventory.application.use_cases.list_stock_levels import (
+    ListStockLevelsUseCase,
+)
 from candy_store.inventory.application.use_cases.receive_stock_batch import (
     ReceiveStockBatchCommand,
     ReceiveStockBatchUseCase,
@@ -38,7 +41,11 @@ from candy_store.inventory.domain.errors import (
 from candy_store.inventory.domain.value_objects import (
     AdjustmentReason,
     BatchId,
+    StockLocation,
     StockReference,
+)
+from candy_store.inventory.infrastructure.persistence.stock_queries import (
+    SqlAlchemyStockQueries,
 )
 from candy_store.inventory.infrastructure.persistence.unit_of_work import (
     SqlAlchemyInventoryUnitOfWork,
@@ -51,6 +58,7 @@ from candy_store.inventory.infrastructure.web.schemas import (
     ReceiveBatchRequest,
     ReceiveBatchResponse,
     RegisterLossRequest,
+    StockLevelResponse,
     StockSummaryResponse,
 )
 from candy_store.shared.domain.value_objects import ProductId
@@ -144,3 +152,14 @@ async def assemble_kits(
         )
     )
     return AssemblyResponse.from_result(result)
+
+
+@router.get("/stock")
+async def list_stock_levels(
+    location: StockLocation, session_factory: SessionFactoryDep, clock: ClockDep
+) -> list[StockLevelResponse]:
+    """Stock de todos los productos en una ubicación (ej. `store_front` para el mostrador)."""
+    levels = await ListStockLevelsUseCase(SqlAlchemyStockQueries(session_factory), clock).execute(
+        location
+    )
+    return [StockLevelResponse.of(level) for level in levels]

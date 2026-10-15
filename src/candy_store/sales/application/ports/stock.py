@@ -7,7 +7,7 @@ adaptador concreto vive en sales/infrastructure/inventory.
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from candy_store.sales.domain.value_objects import OrderId
 from candy_store.shared.domain.value_objects import ProductId
@@ -48,9 +48,13 @@ class StockGateway(ABC):
 
     @abstractmethod
     async def hold_for_online_order(
-        self, order_id: OrderId, items: Sequence[ItemQuantity]
+        self,
+        order_id: OrderId,
+        items: Sequence[ItemQuantity],
+        hold_for: timedelta | None = None,
     ) -> datetime:
-        """Checkout online: aparta stock y devuelve hasta cuándo se mantiene."""
+        """Checkout online: aparta stock (por `hold_for` o el plazo por defecto) y
+        devuelve hasta cuándo se mantiene."""
 
     @abstractmethod
     async def commit_online_order(self, order_id: OrderId) -> None:

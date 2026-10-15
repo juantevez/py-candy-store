@@ -109,12 +109,17 @@ class InventoryFacade:
             )
 
     async def reserve(
-        self, reference: str, location: Location, lines: Sequence[StockRequestLine]
+        self,
+        reference: str,
+        location: Location,
+        lines: Sequence[StockRequestLine],
+        ttl: timedelta | None = None,
     ) -> datetime:
-        """Aparta stock para un checkout. Devuelve hasta cuándo se mantiene la reserva."""
+        """Aparta stock para un checkout por `ttl` (o la duración por defecto).
+        Devuelve hasta cuándo se mantiene la reserva."""
         with _translate_errors():
             receipt = await ReserveStockUseCase(
-                self._uow_factory(), self._clock, self._reservation_ttl
+                self._uow_factory(), self._clock, ttl or self._reservation_ttl
             ).execute(
                 ReserveStockCommand(
                     reference=_reference(reference),

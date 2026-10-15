@@ -110,9 +110,10 @@ def _mercadopago(settings: Settings, client: httpx.AsyncClient) -> MercadoPagoGa
         MercadoPagoConfig(
             access_token=settings.mercadopago_access_token,
             notification_url=f"{settings.public_base_url.rstrip('/')}/sales/webhooks/mercadopago",
-            success_url=f"{storefront}/checkout/exito",
-            failure_url=f"{storefront}/checkout/error",
-            pending_url=f"{storefront}/checkout/pendiente",
+            # Página estática del front: con ?checkout=... muestra el resultado del pago.
+            success_url=f"{storefront}/index.html?checkout=exito",
+            failure_url=f"{storefront}/index.html?checkout=error",
+            pending_url=f"{storefront}/index.html?checkout=pendiente",
         ),
     )
 

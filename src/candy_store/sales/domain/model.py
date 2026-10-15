@@ -33,13 +33,15 @@ from candy_store.shared.domain.aggregate import AggregateRoot
 from candy_store.shared.domain.value_objects import Money
 
 _CANCELLABLE = {OrderStatus.PLACED, OrderStatus.AWAITING_PAYMENT}
+ONLINE_PAYMENT_METHODS = frozenset({PaymentMethod.MERCADOPAGO, PaymentMethod.BANK_TRANSFER})
 
 
 class Order(AggregateRoot):
     """Ciclo de vida:
 
     Mostrador: PLACED -> COMPLETED                 (o CANCELLED si no hay stock)
-    Online:    PLACED -> AWAITING_PAYMENT -> PAID  (o CANCELLED por stock, falla del
+    Online:    PLACED -> AWAITING_PAYMENT -> PAID  (Mercado Pago o transferencia;
+               o CANCELLED por stock, falla del
                checkout o vencimiento de la reserva; REFUND_REQUIRED si el pago se
                aprueba pero no se puede entregar)
 
@@ -130,25 +132,62 @@ class Order(AggregateRoot):
 
     # --- Online ----------------------------------------------------------
 
-    def await_payment(self, checkout: CheckoutSession, hold_expires_at: datetime) -> None:
+    def await_payment(
+        self,
+        method: PaymentMethod,
+        hold_expires_at: datetime,
+        checkout: CheckoutSession | None = None,
+    ) -> None:
+        """El stock quedó apartado hasta `hold_expires_at` esperando el pago.
+
+        Mercado Pago necesita la sesión de pago creada en la pasarela; la
+        transferencia no (el comprador recibe los datos bancarios).
+        """
         self._require_channel(SalesChannel.ONLINE)
         self._require_status(OrderStatus.PLACED)
+        if method not in ONLINE_PAYMENT_METHODS:
+            raise InvalidOrderError(f"Medio de pago no disponible para compras online: {method}")
+        if method is PaymentMethod.MERCADOPAGO and checkout is None:
+            raise InvalidOrderError("Un pago con Mercado Pago necesita la sesión de pago")
         self.status = OrderStatus.AWAITING_PAYMENT
+        self.payment_method = method
         self.checkout = checkout
         self.hold_expires_at = hold_expires_at
-        self._record(OrderAwaitingPayment(order_id=self.order_id, checkout_id=checkout.checkout_id))
+        self._record(
+            OrderAwaitingPayment(
+                order_id=self.order_id,
+                payment_method=method,
+                checkout_id=checkout.checkout_id if checkout else None,
+            )
+        )
 
     def mark_paid(self, payment_id: str, amount: Money, at: datetime) -> None:
+        """Pago aprobado por la pasarela (Mercado Pago)."""
         if self.status is OrderStatus.PAID and self.payment_id == payment_id:
             return  # notificación repetida del mismo pago
         self._require_status(OrderStatus.AWAITING_PAYMENT)
+        self._require_payment_method(PaymentMethod.MERCADOPAGO)
         if amount != self.total:
             raise PaymentAmountMismatchError(f"Se cobró {amount} y la orden suma {self.total}")
         self.status = OrderStatus.PAID
-        self.payment_method = PaymentMethod.MERCADOPAGO
         self.payment_id = payment_id
         self.closed_at = at
         self._record(OrderPaid(order_id=self.order_id, payment_id=payment_id, total=self.total))
+
+    def confirm_transfer(self, bank_reference: str | None, at: datetime) -> None:
+        """El personal verificó que la transferencia se acreditó en la cuenta."""
+        if self.status is OrderStatus.PAID and self.payment_method is PaymentMethod.BANK_TRANSFER:
+            return  # confirmación repetida
+        self._require_status(OrderStatus.AWAITING_PAYMENT)
+        self._require_payment_method(PaymentMethod.BANK_TRANSFER)
+        self.status = OrderStatus.PAID
+        self.payment_id = (
+            bank_reference.strip() if bank_reference and bank_reference.strip() else None
+        )
+        self.closed_at = at
+        self._record(
+            OrderPaid(order_id=self.order_id, payment_id=self.payment_id, total=self.total)
+        )
 
     def require_refund(self, payment_id: str, reason: RefundReason, at: datetime) -> None:
         """Se cobró un pago que no se puede convertir en entrega."""
@@ -184,6 +223,12 @@ class Order(AggregateRoot):
         if self.channel is not channel:
             raise InvalidOrderStateError(
                 f"Operación de canal {channel} sobre una orden {self.channel}"
+            )
+
+    def _require_payment_method(self, method: PaymentMethod) -> None:
+        if self.payment_method is not method:
+            raise InvalidOrderStateError(
+                f"La orden {self.order_id} se paga con {self.payment_method}, no con {method}"
             )
 
     def _require_status(self, status: OrderStatus) -> None:

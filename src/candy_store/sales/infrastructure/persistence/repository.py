@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from candy_store.sales.application.ports.repository import OrderRepository
@@ -35,6 +36,13 @@ class SqlAlchemyOrderRepository(OrderRepository):
 
     async def add(self, order: Order) -> None:
         self._seen[order.order_id] = (order, None)
+
+    async def list_recent(self, *, channel: SalesChannel | None, limit: int) -> list[Order]:
+        query = select(OrderRow).order_by(OrderRow.placed_at.desc()).limit(limit)
+        if channel is not None:
+            query = query.where(OrderRow.channel == channel.value)
+        rows = await self._session.scalars(query)
+        return [_to_domain(row) for row in rows]
 
     @property
     def seen(self) -> list[Order]:

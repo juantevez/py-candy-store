@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     background_tasks_enabled: bool = True
     outbox_poll_interval_seconds: float = 1.0
     outbox_batch_size: int = 100
-    reservation_ttl_minutes: int = 15
+    # Reserva de stock del checkout online según el medio de pago.
+    reservation_ttl_minutes: int = 15  # Mercado Pago
+    transfer_hold_hours: int = 24  # transferencia bancaria
     reservation_sweep_interval_seconds: float = 30.0
 
     # URL pública de esta API (MercadoPago envía las notificaciones acá).
@@ -27,6 +29,12 @@ class Settings(BaseSettings):
     # rechazan todas las notificaciones.
     mercadopago_webhook_secret: str = ""
     mercadopago_timeout_seconds: float = 10.0
+
+    # Cuenta para las compras online pagadas por transferencia.
+    transfer_alias: str = "CANDY.STORE.DEMO"
+    transfer_cbu: str = "0000003100000000000001"
+    transfer_holder: str = "Candy Store (cuenta de demostración)"
+    transfer_bank: str = "Banco de prueba"
 
 
 @lru_cache

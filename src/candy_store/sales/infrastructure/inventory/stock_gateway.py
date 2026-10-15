@@ -3,7 +3,7 @@ inventory. Es el único lugar de sales que conoce a inventory."""
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from candy_store.inventory import public as inventory
 from candy_store.sales.application.ports.stock import (
@@ -30,10 +30,15 @@ class InProcessStockGateway(StockGateway):
             await self._inventory.deduct(str(order_id), COUNTER_LOCATION, _lines(items))
 
     async def hold_for_online_order(
-        self, order_id: OrderId, items: Sequence[ItemQuantity]
+        self,
+        order_id: OrderId,
+        items: Sequence[ItemQuantity],
+        hold_for: timedelta | None = None,
     ) -> datetime:
         with _translate_errors():
-            return await self._inventory.reserve(str(order_id), ONLINE_LOCATION, _lines(items))
+            return await self._inventory.reserve(
+                str(order_id), ONLINE_LOCATION, _lines(items), ttl=hold_for
+            )
 
     async def commit_online_order(self, order_id: OrderId) -> None:
         with _translate_errors():

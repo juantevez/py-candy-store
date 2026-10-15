@@ -14,6 +14,7 @@ from candy_store.sales.application.use_cases._orders import find_order, update_o
 from candy_store.sales.domain.value_objects import (
     OrderId,
     OrderStatus,
+    PaymentMethod,
     RefundReason,
     SalesChannel,
 )
@@ -60,6 +61,9 @@ class HandlePaymentNotificationUseCase:
         order = await find_order(self._uow, payment.order_id)
         if order is None or order.channel is not SalesChannel.ONLINE:
             logger.warning("Pago %s de una orden desconocida %s", payment_id, payment.order_id)
+            return PaymentNotificationOutcome.IGNORED
+        if order.payment_method is PaymentMethod.BANK_TRANSFER:
+            logger.warning("Pago %s de Mercado Pago para una orden por transferencia", payment_id)
             return PaymentNotificationOutcome.IGNORED
         if payment.status is not PaymentStatus.APPROVED:
             return PaymentNotificationOutcome.NOT_APPROVED

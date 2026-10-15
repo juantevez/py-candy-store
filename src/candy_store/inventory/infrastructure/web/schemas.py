@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, StringConstraints
 
 from candy_store.inventory.application.dto import AssemblyResult
+from candy_store.inventory.application.ports.stock_queries import StockLevel
 from candy_store.inventory.application.use_cases.get_stock_summary import (
     BatchView,
     LocationStock,
@@ -162,4 +163,26 @@ class AssemblyResponse(BaseModel):
                 )
                 for c in result.components
             ],
+        )
+
+
+class StockLevelResponse(BaseModel):
+    product_id: UUID
+    location: StockLocation
+    on_hand: int
+    sellable: int
+    reserved: int
+    available: int
+    next_expiration: date | None
+
+    @classmethod
+    def of(cls, level: StockLevel) -> StockLevelResponse:
+        return cls(
+            product_id=level.product_id.value,
+            location=level.location,
+            on_hand=level.on_hand,
+            sellable=level.sellable,
+            reserved=level.reserved,
+            available=level.available,
+            next_expiration=level.next_expiration,
         )

@@ -15,6 +15,10 @@ from candy_store.sales.application.use_cases.checkout_online_cart import (
     CheckoutOnlineCartCommand,
     CheckoutOnlineCartUseCase,
 )
+from candy_store.sales.application.use_cases.confirm_bank_transfer import (
+    ConfirmBankTransferCommand,
+    ConfirmBankTransferUseCase,
+)
 from candy_store.sales.application.use_cases.get_order import GetOrderUseCase
 from candy_store.sales.application.use_cases.handle_payment_webhook import (
     HandlePaymentNotificationUseCase,
@@ -26,6 +30,7 @@ from candy_store.sales.application.use_cases.process_pos_sale import (
 )
 from candy_store.sales.domain.errors import (
     EmptyOrderError,
+    InvalidOrderError,
     InvalidOrderStateError,
     ProductNotSellableError,
 )
@@ -413,3 +418,110 @@ async def test_expired_hold_does_not_touch_paid_order(
 
     assert await CancelExpiredOrderUseCase(uow, clock).execute(order_id) is False
     assert (await GetOrderUseCase(uow).execute(order_id)).status is OrderStatus.PAID
+
+
+# --- Transferencia bancaria ---------------------------------------------------------
+
+
+def transfer_cart(order_id: OrderId, *items: tuple[ProductId, int]) -> CheckoutOnlineCartCommand:
+    return CheckoutOnlineCartCommand(
+        order_id=order_id,
+        items=[ItemQuantity(pid, qty) for pid, qty in items],
+        customer_email="cliente@example.com",
+        payment_method=PaymentMethod.BANK_TRANSFER,
+    )
+
+
+async def test_transfer_checkout_holds_stock_longer_and_skips_gateway(
+    checkout: CheckoutOnlineCartUseCase, stock: FakeStockGateway, payments: FakePaymentGateway
+) -> None:
+    order_id = OrderId.new()
+
+    result = await checkout.execute(transfer_cart(order_id, (ALFAJOR, 2)))
+
+    assert result.payment_method is PaymentMethod.BANK_TRANSFER
+    assert result.redirect_url is None
+    assert result.expires_at == NOW + timedelta(hours=24)
+    assert order_id in stock.holds
+    assert payments.checkouts == []
+
+
+async def test_cash_is_not_an_online_payment_method(checkout: CheckoutOnlineCartUseCase) -> None:
+    command = CheckoutOnlineCartCommand(
+        order_id=OrderId.new(),
+        items=[ItemQuantity(ALFAJOR, 1)],
+        payment_method=PaymentMethod.CASH,
+    )
+    with pytest.raises(InvalidOrderError):
+        await checkout.execute(command)
+
+
+async def test_confirmed_transfer_takes_stock_and_pays_order(
+    checkout: CheckoutOnlineCartUseCase,
+    uow: FakeSalesUnitOfWork,
+    stock: FakeStockGateway,
+    clock: FixedClock,
+) -> None:
+    order_id = OrderId.new()
+    await checkout.execute(transfer_cart(order_id, (ALFAJOR, 2)))
+    confirm = ConfirmBankTransferUseCase(uow, stock, clock)
+
+    view = await confirm.execute(ConfirmBankTransferCommand(order_id, bank_reference="OP-77"))
+    again = await confirm.execute(ConfirmBankTransferCommand(order_id))
+
+    assert (view.status, view.payment_method, view.payment_id) == (
+        OrderStatus.PAID,
+        PaymentMethod.BANK_TRANSFER,
+        "OP-77",
+    )
+    assert again.status is OrderStatus.PAID
+    assert order_id in stock.taken
+
+
+async def test_transfer_confirmed_after_hold_expired_requires_refund(
+    checkout: CheckoutOnlineCartUseCase,
+    uow: FakeSalesUnitOfWork,
+    stock: FakeStockGateway,
+    clock: FixedClock,
+) -> None:
+    order_id = OrderId.new()
+    await checkout.execute(transfer_cart(order_id, (ALFAJOR, 2)))
+    stock.expire(order_id)
+    await CancelExpiredOrderUseCase(uow, clock).execute(order_id)
+
+    view = await ConfirmBankTransferUseCase(uow, stock, clock).execute(
+        ConfirmBankTransferCommand(order_id)
+    )
+
+    assert (view.status, view.refund_reason) == (
+        OrderStatus.REFUND_REQUIRED,
+        RefundReason.ORDER_CANCELLED,
+    )
+
+
+async def test_only_transfer_orders_can_be_confirmed(
+    checkout: CheckoutOnlineCartUseCase,
+    uow: FakeSalesUnitOfWork,
+    stock: FakeStockGateway,
+    clock: FixedClock,
+) -> None:
+    order_id = await start_checkout(checkout)  # Mercado Pago
+
+    with pytest.raises(InvalidOrderStateError):
+        await ConfirmBankTransferUseCase(uow, stock, clock).execute(
+            ConfirmBankTransferCommand(order_id)
+        )
+
+
+async def test_mercadopago_payment_for_transfer_order_is_ignored(
+    checkout: CheckoutOnlineCartUseCase,
+    webhook: HandlePaymentNotificationUseCase,
+    payments: FakePaymentGateway,
+    uow: FakeSalesUnitOfWork,
+) -> None:
+    order_id = OrderId.new()
+    await checkout.execute(transfer_cart(order_id, (ALFAJOR, 2)))
+    payments.register("1001", order_id, Money.of("3000"))
+
+    assert await webhook.execute("1001") is PaymentNotificationOutcome.IGNORED
+    assert (await GetOrderUseCase(uow).execute(order_id)).status is OrderStatus.AWAITING_PAYMENT

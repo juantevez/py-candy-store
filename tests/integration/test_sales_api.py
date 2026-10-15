@@ -215,3 +215,99 @@ async def test_catalog_crud(shop: Shop) -> None:
     assert updated.json()["name"] == "Alfajor triple x3"
     assert [p["sku"] for p in listed.json()] == ["ALF-TRIPLE"]
     assert (await shop.client.get(f"/catalog/products/{uuid4()}")).status_code == 404
+
+
+async def test_recent_orders_listing(shop: Shop) -> None:
+    alfajor = await shop.product("ALF-1", "1500", store=10, warehouse=10)
+    counter_ids = []
+    for minutes in (1, 2):
+        shop.clock.current = NOW + timedelta(minutes=minutes)
+        order_id = str(uuid4())
+        counter_ids.append(order_id)
+        await shop.client.post(
+            "/sales/counter-sales",
+            json={
+                "order_id": order_id,
+                "items": [{"product_id": alfajor, "quantity": 1}],
+                "payment_method": "cash",
+            },
+        )
+    shop.clock.current = NOW + timedelta(minutes=3)
+    online_id = (await start_checkout(shop, alfajor, 1))["order_id"]
+
+    counter = await shop.client.get("/sales/orders", params={"channel": "counter"})
+    everything = await shop.client.get("/sales/orders", params={"limit": 2})
+
+    assert [o["order_id"] for o in counter.json()] == list(reversed(counter_ids))
+    assert [o["order_id"] for o in everything.json()] == [online_id, counter_ids[1]]
+
+
+async def test_online_purchase_paid_by_bank_transfer(shop: Shop) -> None:
+    alfajor = await shop.product("ALF-1", "1500", warehouse=10)
+    order_id = str(uuid4())
+
+    checkout = await shop.client.post(
+        "/sales/checkouts",
+        json={
+            "order_id": order_id,
+            "items": [{"product_id": alfajor, "quantity": 4}],
+            "customer_email": "cliente@example.com",
+            "payment_method": "bank_transfer",
+        },
+    )
+
+    assert checkout.status_code == 201, checkout.text
+    body = checkout.json()
+    assert (body["payment_method"], body["redirect_url"]) == ("bank_transfer", None)
+    assert body["transfer"]["amount"] == "6000.00"
+    assert body["transfer"]["reference"] == f"CANDY-{order_id[:8].upper()}"
+    assert body["transfer"]["alias"]
+    assert shop.payments.checkouts == []  # no pasa por Mercado Pago
+    assert (await shop.stock(alfajor))["warehouse"]["reserved"] == 4
+
+    confirmed = await shop.client.post(
+        f"/sales/orders/{order_id}/transfer-confirmation", json={"bank_reference": "OP-555"}
+    )
+
+    assert confirmed.status_code == 200, confirmed.text
+    assert (confirmed.json()["status"], confirmed.json()["payment_method"]) == (
+        "paid",
+        "bank_transfer",
+    )
+    warehouse = (await shop.stock(alfajor))["warehouse"]
+    assert (warehouse["on_hand"], warehouse["reserved"]) == (6, 0)
+
+
+async def test_transfer_hold_lasts_longer_than_mercadopago(shop: Shop) -> None:
+    alfajor = await shop.product("ALF-1", "1500", warehouse=10)
+    order_id = str(uuid4())
+    await shop.client.post(
+        "/sales/checkouts",
+        json={
+            "order_id": order_id,
+            "items": [{"product_id": alfajor, "quantity": 1}],
+            "payment_method": "bank_transfer",
+        },
+    )
+
+    shop.clock.current = NOW + timedelta(hours=2)  # Mercado Pago ya habría vencido
+    await shop.run_background_jobs()
+    assert (await shop.order(order_id))["status"] == "awaiting_payment"
+
+    shop.clock.current = NOW + timedelta(hours=25)
+    await shop.run_background_jobs()
+    order = await shop.order(order_id)
+    assert (order["status"], order["cancellation_reason"]) == ("cancelled", "hold_expired")
+
+
+async def test_online_checkout_rejects_counter_payment_methods(shop: Shop) -> None:
+    alfajor = await shop.product("ALF-1", "1500", warehouse=10)
+    response = await shop.client.post(
+        "/sales/checkouts",
+        json={
+            "order_id": str(uuid4()),
+            "items": [{"product_id": alfajor, "quantity": 1}],
+            "payment_method": "cash",
+        },
+    )
+    assert response.status_code == 422

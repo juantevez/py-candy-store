@@ -112,7 +112,10 @@ Integraciones asincrónicas (eventos vía outbox, suscriptores idempotentes):
 | POST   | `/purchasing/orders/{id}/closure`                 | Cerrar una orden con faltantes           |
 | POST   | `/purchasing/remittances`                         | Recepción de un remito en depósito       |
 | POST   | `/sales/counter-sales`                            | Venta de mostrador (descuenta del salón) |
-| POST   | `/sales/checkouts`                                | Checkout web: reserva + pago MercadoPago |
+| POST   | `/sales/checkouts`                                | Checkout web: Mercado Pago o transferencia |
+| POST   | `/sales/orders/{id}/transfer-confirmation`        | Uso interno: confirmar transferencia acreditada |
+| GET    | `/sales/orders?channel=counter`                   | Últimas órdenes                          |
+| GET    | `/inventory/stock?location=store_front`           | Stock de todos los productos en una ubicación |
 | GET    | `/sales/orders/{order_id}`                        | Estado de una orden                      |
 | POST   | `/sales/webhooks/mercadopago`                     | Notificaciones de pago (firmadas)        |
 
@@ -165,6 +168,13 @@ Online:    placed ──► awaiting_payment ──► paid
 Un pago rechazado no cancela la orden: en Checkout Pro el comprador puede
 reintentar con otro medio mientras la reserva siga vigente. La preferencia de
 pago vence junto con la reserva de stock.
+
+**Transferencia bancaria (online):** el checkout con `payment_method: "bank_transfer"`
+reserva el stock por `CANDY_TRANSFER_HOLD_HOURS` (24 h por defecto) y devuelve los datos
+de la cuenta (`CANDY_TRANSFER_ALIAS`, `_CBU`, `_HOLDER`, `_BANK`) y una referencia para el
+concepto. El personal confirma la acreditación con
+`POST /sales/orders/{id}/transfer-confirmation`; si la reserva ya venció, la orden queda
+`refund_required` para devolver el dinero.
 
 ## MercadoPago
 

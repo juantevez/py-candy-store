@@ -129,7 +129,8 @@ async def pay(
             "external_reference": pref["external_reference"],
         }
     )
-    return RedirectResponse(f"{back}?{query}", status_code=303)
+    separator = "&" if "?" in back else "?"
+    return RedirectResponse(f"{back}{separator}{query}", status_code=303)
 
 
 @app.get("/v1/payments/{payment_id}")

@@ -7,7 +7,18 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from candy_store.inventory.domain.value_objects import (
+    BatchId,
+    ExpirationDate,
+    LotNumber,
+    StockLocation,
+)
+from candy_store.inventory.infrastructure.persistence.unit_of_work import (
+    SqlAlchemyInventoryUnitOfWork,
+)
+from candy_store.inventory.public import InventoryFacade, StockRequestLine
 from candy_store.main import create_app
+from candy_store.shared.domain.value_objects import ProductId
 from candy_store.shared.infrastructure.settings import Settings
 from tests.fakes import FixedClock
 from tests.unit.inventory.conftest import NOW, TODAY
@@ -171,3 +182,62 @@ async def test_stock_outflows_are_not_exposed_over_http(client: AsyncClient, pat
     """Las salidas de stock solo ocurren a través de sales (inventory.public)."""
     response = await client.post(path, json={})
     assert response.status_code == 404
+
+
+async def test_location_stock_listing_matches_aggregate_rules(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """El read model en SQL aplica las mismas reglas que el agregado: lotes vencidos
+    no son vendibles y lo reservado no está disponible."""
+    with_expired = str(uuid4())
+    reserved = str(uuid4())
+    other_location = str(uuid4())
+    await receive(client, with_expired, quantity=10, expires_in_days=30)
+    await receive(client, reserved, quantity=8, expires_in_days=5)
+    await receive(client, reserved, quantity=4, expires_in_days=60)
+    await client.post(
+        "/inventory/batches",
+        json={**batch_body(other_location), "location": "warehouse"},
+    )
+    # Lote ya vencido: se inserta "en el pasado" con un reloj anterior.
+    async with SqlAlchemyInventoryUnitOfWork(session_factory) as uow:
+        item = await uow.items.get(ProductId.from_string(with_expired), StockLocation.STORE_FRONT)
+        assert item is not None
+        item.receive_batch(
+            batch_id=BatchId.new(),
+            lot_number=LotNumber("VIEJO"),
+            expiration=ExpirationDate(TODAY - timedelta(days=1)),
+            quantity=5,
+            received_at=NOW,
+            today=TODAY - timedelta(days=10),
+        )
+        await uow.commit()
+    await InventoryFacade(
+        lambda: SqlAlchemyInventoryUnitOfWork(session_factory),
+        FixedClock(NOW),
+        timedelta(minutes=15),
+    ).reserve(
+        "ORD-1", StockLocation.STORE_FRONT, [StockRequestLine(ProductId.from_string(reserved), 3)]
+    )
+
+    response = await client.get("/inventory/stock", params={"location": "store_front"})
+
+    assert response.status_code == 200
+    levels = {level["product_id"]: level for level in response.json()}
+    assert other_location not in levels
+    assert levels[with_expired] | {"product_id": None} == {
+        "product_id": None,
+        "location": "store_front",
+        "on_hand": 15,
+        "sellable": 10,
+        "reserved": 0,
+        "available": 10,
+        "next_expiration": (TODAY + timedelta(days=30)).isoformat(),
+    }
+    assert (levels[reserved]["sellable"], levels[reserved]["reserved"]) == (12, 3)
+    assert levels[reserved]["available"] == 9
+    assert levels[reserved]["next_expiration"] == (TODAY + timedelta(days=5)).isoformat()
+    for product_id, level in levels.items():
+        summary = await stock_of(client, product_id)
+        [location] = [loc for loc in summary["locations"] if loc["location"] == "store_front"]
+        assert level["available"] == location["available"]

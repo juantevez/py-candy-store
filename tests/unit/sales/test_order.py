@@ -52,7 +52,7 @@ def place(channel: SalesChannel, *lines: OrderLine) -> Order:
 
 def awaiting_payment() -> Order:
     order = place(SalesChannel.ONLINE, line("1500", 2), line("800", 1))
-    order.await_payment(SESSION, NOW + timedelta(minutes=15))
+    order.await_payment(PaymentMethod.MERCADOPAGO, NOW + timedelta(minutes=15), SESSION)
     order.pull_events()
     return order
 
@@ -102,7 +102,7 @@ def test_online_order_cannot_be_completed_at_the_counter() -> None:
 
 def test_counter_order_cannot_await_online_payment() -> None:
     with pytest.raises(InvalidOrderStateError):
-        place(SalesChannel.COUNTER).await_payment(SESSION, NOW)
+        place(SalesChannel.COUNTER).await_payment(PaymentMethod.MERCADOPAGO, NOW, SESSION)
 
 
 def test_online_payment_flow() -> None:
@@ -162,3 +162,57 @@ def test_paid_order_cannot_be_flagged_for_refund() -> None:
 
     with pytest.raises(InvalidOrderStateError):
         order.require_refund("pay-2", RefundReason.ORDER_CANCELLED, NOW)
+
+
+# --- Transferencia bancaria ---------------------------------------------------------
+
+
+def awaiting_transfer() -> Order:
+    order = place(SalesChannel.ONLINE, line("1500", 2))
+    order.await_payment(PaymentMethod.BANK_TRANSFER, NOW + timedelta(hours=24))
+    order.pull_events()
+    return order
+
+
+def test_transfer_needs_no_payment_session() -> None:
+    order = awaiting_transfer()
+
+    assert order.status is OrderStatus.AWAITING_PAYMENT
+    assert order.payment_method is PaymentMethod.BANK_TRANSFER
+    assert order.checkout is None
+
+
+def test_confirm_transfer() -> None:
+    order = awaiting_transfer()
+
+    order.confirm_transfer("  OP-123  ", NOW)
+    order.confirm_transfer("OP-123", NOW)  # confirmación repetida
+
+    assert order.status is OrderStatus.PAID
+    assert order.payment_id == "OP-123"
+    [event] = order.pull_events()
+    assert isinstance(event, OrderPaid)
+
+
+def test_confirm_transfer_without_bank_reference() -> None:
+    order = awaiting_transfer()
+    order.confirm_transfer(None, NOW)
+    assert (order.status, order.payment_id) == (OrderStatus.PAID, None)
+
+
+def test_payment_methods_cannot_be_mixed() -> None:
+    with pytest.raises(InvalidOrderStateError):
+        awaiting_transfer().mark_paid("pay-1", Money.of("3000"), NOW)
+    with pytest.raises(InvalidOrderStateError):
+        awaiting_payment().confirm_transfer(None, NOW)
+
+
+@pytest.mark.parametrize("method", [PaymentMethod.CASH, PaymentMethod.DEBIT_CARD])
+def test_counter_only_methods_are_not_available_online(method: PaymentMethod) -> None:
+    with pytest.raises(InvalidOrderError):
+        place(SalesChannel.ONLINE).await_payment(method, NOW)
+
+
+def test_mercadopago_needs_payment_session() -> None:
+    with pytest.raises(InvalidOrderError):
+        place(SalesChannel.ONLINE).await_payment(PaymentMethod.MERCADOPAGO, NOW)

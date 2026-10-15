@@ -31,7 +31,7 @@ from candy_store.sales.application.ports.stock import (
     UnavailableItem,
 )
 from candy_store.sales.domain.model import Order
-from candy_store.sales.domain.value_objects import CheckoutSession, OrderId
+from candy_store.sales.domain.value_objects import CheckoutSession, OrderId, SalesChannel
 from candy_store.shared.domain.events import DomainEvent
 from candy_store.shared.domain.value_objects import Money, ProductId
 from candy_store.shared.infrastructure.clock import STORE_TIMEZONE
@@ -166,6 +166,10 @@ class InMemoryOrderRepository(OrderRepository):
         self.items[order.order_id] = order
         self.seen.add(order.order_id)
 
+    async def list_recent(self, *, channel: SalesChannel | None, limit: int) -> list[Order]:
+        orders = [o for o in self.items.values() if channel is None or o.channel is channel]
+        return sorted(orders, key=lambda o: o.placed_at, reverse=True)[:limit]
+
 
 class FakeStockGateway(StockGateway):
     """Stock en memoria con la misma semántica que inventory: todo o nada e
@@ -174,6 +178,7 @@ class FakeStockGateway(StockGateway):
     def __init__(self, available: dict[ProductId, int], clock: FixedClock) -> None:
         self.available = dict(available)
         self.holds: dict[OrderId, list[ItemQuantity]] = {}
+        self.hold_expirations: dict[OrderId, datetime] = {}
         self.taken: dict[OrderId, list[ItemQuantity]] = {}
         self._clock = clock
 
@@ -184,12 +189,16 @@ class FakeStockGateway(StockGateway):
         self.taken[order_id] = list(items)
 
     async def hold_for_online_order(
-        self, order_id: OrderId, items: Sequence[ItemQuantity]
+        self,
+        order_id: OrderId,
+        items: Sequence[ItemQuantity],
+        hold_for: timedelta | None = None,
     ) -> datetime:
         if order_id not in self.holds:
             self._take(items)
             self.holds[order_id] = list(items)
-        return self._clock.now() + HOLD_TTL
+            self.hold_expirations[order_id] = self._clock.now() + (hold_for or HOLD_TTL)
+        return self.hold_expirations[order_id]
 
     async def commit_online_order(self, order_id: OrderId) -> None:
         if order_id in self.taken:
